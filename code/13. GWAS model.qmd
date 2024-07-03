@@ -1,0 +1,177 @@
+---
+title: "13.Beocat Run GP model"
+author: "N. Giordano"
+format: html
+editor: visual
+---
+
+## Packages
+
+```{r setup, warning=F, message=F}
+library(tidyverse)
+library(rstan)
+library(multidplyr)
+#source("functions.R")
+# To run stan faster
+rstan_options(auto_write = TRUE, silent = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+## Load data
+
+```{r}
+## Hapmap
+numHap <- data.table::fread("../data/genotypes/numericGeno_MLC80.txt")[,] %>% 
+  as_tibble() %>% 
+  rename(G = `<Marker>`) %>% 
+  drop_na() %>% 
+  arrange()
+  
+## Phenotype
+dataVPT <- read_csv("../data/phenotypes/vpt_all_final.csv", 
+                    show_col_types = F) %>% 
+  mutate(G = str_replace_all(G, " ", "_"))
+## Join phenotype and genotype
+dataMerge <- left_join(unique(dataVPT[,c("G","PP_GY")]),numHap[,], by = "G") %>% 
+  drop_na() %>% 
+  arrange(G) 
+
+
+kiNames <- data.table::fread("../data/genotypes/kinship_MLC80.txt")[3,] %>% 
+  as.tibble() %>% 
+  mutate_all(~as.character(.)) %>% 
+  pivot_longer(cols = everything())
+
+kin <- data.table::fread("../data/genotypes/kinship_MLC80.txt")[-c(1:3),] %>% 
+  rename(G = V1) %>% 
+  rename_at(vars(contains("V")), ~kiNames$value[-1])
+
+## Aca esta el error
+dataKin <- as.tibble(kin) %>% 
+  full_join(dataMerge,
+            by = join_by(G))
+
+dataKin <- dataKin %>% 
+  filter(G %in% dataMerge$G) %>% 
+  arrange(G)
+
+K <- dataKin[,c(dataKin$G)] %>% 
+  mutate_all(~as.double(.))
+
+y <- dataKin$PP_GY
+X <- dataKin[,c(names(numHap)[-1])] 
+L <- t(chol(K))
+```
+
+## Cross validation
+
+```{r}
+set.seed(1543)
+## Load Model
+stanModel <- stan_model("../model_input/Cross Validation Model.stan")
+
+#seq(0.001, 0.005, 0.0005)
+lambdas <- c(0.0001, 0.01, 0.1, 0.5, 1, 3, 10, 20)
+
+dataModelCV <- function(inLambda){
+  # Data
+  dataModel <- list(
+    N = 231,
+    N_test = 77,
+    K = length(X),
+    X = X, 
+    y = y,    
+    lambda = inLambda)
+}
+
+```
+
+```{r}
+lambdas <- c(0.0001,0.001, 0.01, 0.1, 0.5, 1, 3, 10, 20)
+cl <- length(lambdas)
+cluster <- new_cluster(cl)
+cluster_library(cluster, c("dplyr", "purrr", "rstan"))
+environment <- c("X", "y", "L", "dataModelCV", "stanModel")
+
+cluster_copy(cluster, environment)
+
+
+data.frame(lambdas) %>% 
+  multidplyr::partition(cluster) %>% 
+  mutate(.,
+         dataModel = map(lambdas, ~dataModelCV(.)), 
+         model = map2(dataModel, lambdas, 
+                      ~sampling(stanModel, 
+                                data = .x, 
+                                chains = 1, 
+                                cores = 1,
+                                seed = 1234,
+                                warmup = 2000,
+                                iter = 5000,
+                                thin = 3, 
+                                sample_file = paste0("../output/model output/CV_lambda_", as.character(.y))
+                                )
+                      )
+           
+         )
+
+```
+
+## Optimum Lambda
+
+```{r}
+path <- "../output/model output/"
+models <- list.files(path, pattern = "CV_lambda_")
+
+
+rmse <- map(models, function(model){
+  lambda <- parse_number(model)
+  rmse_mean <- mean(extract(read_stan_csv(paste0(path,model)), 
+                            pars = "root_mean_squared_error")$`root_mean_squared_error`)
+  
+  return(c(lambda, rmse_mean))
+})
+
+out <- as.data.frame(t(as.data.frame(rmse)))
+colnames(out) <- c("Lambda", "RMSE")
+plot(out$Lambda[1:2], out$RMSE[1:2])
+```
+
+Run model with optimum lambda
+
+```{r}
+set.seed(1543)
+## Load Model
+stanModel <- stan_model("../model_input/Opt_Lambda_model_Kinship.stan")
+# Lowest lambda is 0.001
+lambda <- 0.001
+  # Data
+dataModel <- list(
+  N = length(y),
+  K = length(X),
+  X = X, 
+  L = L,
+  y = y,    
+  lambda = lambda)
+
+sampling(stanModel, 
+         data = dataModel, 
+         chains = 4, 
+         cores = 4,
+         seed = 1234,
+         warmup = 2000,
+         iter = 10000,
+         thin = 3, 
+         sample_file = "../output/model output/model kinship lambda 0.001"
+         ) 
+  
+test <- read_stan_csv("../output/model output/test")
+
+stan_hist(model, pars = "epsilon[50]")
+
+hist(extract(test, pars = "root_mean_squared_error")$`root_mean_squared_error`)
+
+extract(model, pars = "z") 
+#saveRDS(model, "../output/GPmodel_OptLambda_Kinship.RData")
+
+```
