@@ -1,0 +1,106 @@
+
+
+```{r include  = FALSE}
+suppressWarnings(source("../functions.R"))
+```
+
+```{r}
+dataVPT <- read.csv("../../data/phenotypes/dataVPT.csv")
+
+dataNE <- 
+dataVPT %>% 
+  filter(n_env >= 100) %>% 
+  select(G, E, GY) %>% 
+  nest()
+```
+
+```{r}
+outNE <- 
+  expand_grid(dataNE = dataNE, 
+              NE = 2:100
+              ) %>% 
+  mutate(M = map2(dataNE, NE, function(dataNE, NE){
+    # Get a list of environments
+    allE <- unique(dataNE[[1]]$E)
+    
+    
+    # Get a sample of environments of size NE (2- 50)
+    set.seed(123)
+    dataFW <- 
+      dataNE[[1]] %>% 
+      filter(E %in% sample(allE, NE))
+    
+    # Run reaction norm to retrieve plasticity estimates over sample of E
+    fw <- FW(y = dataFW$GY,
+             VAR = dataFW$G,
+             ENV = dataFW$E,
+             method ="Gibbs",
+             nchain = 1, 
+             seed = c(123),
+             burnIn = 2000, 
+             nIter = 5000)
+    
+     out <- data.frame(G = fw$VARlevels, .slope = rowMeans(fw$b) + 1)
+     return(out)
+    
+    })
+    ) %>% 
+  select(-dataNE)
+
+saveRDS(outNE, "../../output/model output/Min_environments_plasticity.RData")
+```
+
+```{r}
+outNE <- readRDS("../../output/model output/Min_environments_plasticity.RData") %>% 
+  unnest(M) 
+
+outNEvar <- outNE %>% 
+  mutate(group = cut(NE,breaks = seq(0,100, 5)), 
+         NE = as.numeric(str_extract(group, "\\d+"))) %>% 
+  group_by(NE, G) %>% 
+  summarise(var = sd(.slope)) %>% 
+  drop_na()
+```
+
+```{r}
+mod <- nls(var ~ SSexpf(NE, a, c), data = outNEvar)
+
+preds <- data.frame(NE = outNEvar$NE, preds = predict(mod)) 
+
+ predict(mod, newdata = c(NE = 25))
+pne <- 
+outNEvar %>% 
+  ggplot(aes(x= NE, y = var))+
+  geom_point(shape = 21, alpha = 0.3, fill = "grey30")+
+  geom_line(data = preds, aes(x = NE, y = preds), linewidth = 1, color = "red")+
+  geom_vline(aes(xintercept = 25), linewidth = 1, linetype = "dashed", color = "red")+
+  labs(y = expression("Yield plasticity standard deviation"), x = "Number of environments")+
+  theme_nice()+
+  scale_x_continuous(limits = c(0, 100))+
+  scale_y_continuous(limits = c(0, 0.5))
+```
+
+```{r}
+pne2 <- 
+outNE %>% 
+  left_join(outNE %>% filter(NE == 100) %>% rename(max = .slope) %>% select(-NE), by = join_by(G)) %>% 
+  mutate(.slope = .slope/max) %>% 
+  ggplot(aes(x= NE, y = .slope))+
+  geom_hline(aes(yintercept = 1), linewidth = 1, linetype = "dashed", color = "red")+
+
+  geom_point(shape = 21, alpha = 0.3, fill = "grey30")+
+  geom_vline(aes(xintercept = 25), linewidth = 1, linetype = "dashed", color = "red")+
+  labs(y = expression("Relative yield plasticity"), x = "Number of environments")+
+  theme_nice()+
+  scale_x_continuous(limits = c(0, 100))
+```
+
+```{r}
+pne3 <- ggpubr::ggarrange(pne, pne2, ncol = 2,labels = "AUTO")
+ggsave(plot = pne3, filename = "../../output/plots/paper/Plasticity_N_env.png", width = 8, height = 4)
+```
+
+
+
+
+

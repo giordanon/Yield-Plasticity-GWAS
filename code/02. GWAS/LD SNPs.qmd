@@ -1,0 +1,137 @@
+
+```{r message=FALSE}
+library(GenomicRanges)
+library(IRanges)
+library(tidyverse)
+library(hrbrthemes)
+library(tm)
+library(proustr)
+library(VennDiagram) # Venn diagram to visualize overlaps
+library(snpStats)
+library(LDheatmap)
+library(RColorBrewer)
+
+clrs <- MetBrewer::met.brewer("Java")
+`%nin%` <- Negate(`%in%`)
+```
+
+```{r message=FALSE}
+# Get significant SNPs
+path <- "../../output/GWAS_FarmCPU_Cov/PC_10/"
+pattern <- "GAPIT.Association.GWAS_Results.*"
+files <- list.files(path = path, 
+                    pattern = pattern,  
+                    full.names = T)
+
+
+
+```
+
+
+```{r}
+filterTrait <- "slope"
+traitName <- "Yield plasticity"
+
+pdata <- read_csv(files, id = "trait") %>% 
+  janitor::clean_names() %>% 
+  # Extract trait names from file path
+  mutate(trait = as.character(str_extract_all(trait, "mean|q050|q975|slope")), 
+         logp = -log10(p_value)) %>% 
+  # Filter FDR < 5%
+  filter(logp >3) %>% 
+  rowid_to_column("id") %>% 
+  unique() %>% 
+  filter(trait == filterTrait) 
+
+Y <- readRDS("../../output/model output/phenotypes_distribution_moments.RData")
+
+G <- data.table::fread("../../data/genotypes/genotype_data_KNNimputed_fromMLC80_maf05_maxhet_5.hmp.txt", 
+                       header = FALSE)
+
+names <- 
+  G[1,12:251] %>% 
+  pivot_longer(cols = everything(), 
+               names_to = "var_no",
+               values_to = "G") %>%
+  filter(G %in% Y$G)
+
+Gn <- data.table::fread("../../data/genotypes/genotype_data_KNNimputed_fromMLC80_maf05_maxhet_5_numeric.hmp.txt", 
+                       header = T) %>% 
+  as.data.frame() %>% 
+  select(`<Marker>`,pdata$snp) %>% 
+  rename(G = `<Marker>`) %>% 
+  filter(G %in% names$G) %>% 
+  select(-G)
+
+gdat<-as(as.matrix(Gn),"SnpMatrix")
+
+svg(paste0("../../output/plots/Haploview/Haploview_",traitName,".svg"), width = 7, height = 5)
+MyHeatmap <- 
+LDheatmap(gdat,
+          genetic.distances=unique(pdata$pos), 
+          color = rev(brewer.pal(9, name = "Blues")), 
+          title = traitName, 
+          SNP.name = pdata$snp,
+          geneMapLabelX = F,
+          flip = T)
+dev.off()
+```
+
+
+
+```{r}
+# Filter out SNPs that are under LD with others
+pdata <- read_csv(files, id = "trait") %>% 
+  janitor::clean_names() %>% 
+  # Extract trait names from file path
+  mutate(trait = as.character(str_extract_all(trait, "mean|q050|q975|slope")), 
+         logp = -log10(p_value)) %>% 
+  # Filter FDR < 5%
+  filter(logp >3) %>% 
+  rowid_to_column("id") %>% 
+  unique()
+
+filterSnp <- 
+pdata %>% 
+  mutate(.,
+         snp = case_when(trait == "mean" & snp %in% c("S2A_25070268","S2A_25070272", "S2A_25070283", "S6B_649190074", "S6B_651770832") ~ NA_character_, 
+                         trait == "q050" & snp %in% c("S2B_98371953","S2B_97794355", "S7D_13070644", "S7D_13415400", "S1A_27594593") ~ NA_character_, T~snp
+                         )
+         ) %>% 
+  drop_na(snp) %>% 
+  select(trait, snp, chr, pos) 
+
+window <- IRanges(filterSnp$pos, width=20000)
+filterSnp <- 
+filterSnp %>% 
+  cbind(window)
+
+
+write.csv(filterSnp, "../../output/plots/Haploview/uniqueSNPs_window20k.csv")
+```
+```{r}
+Gn <- data.table::fread("../../data/genotypes/genotype_data_KNNimputed_fromMLC80_maf05_maxhet_5_numeric.hmp.txt", 
+                       header = T) %>% 
+  as.data.frame() %>% 
+  select(`<Marker>`,filterSnp$snp) %>% 
+  rename(G = `<Marker>`) %>% 
+  filter(G %in% names$G) %>% 
+  select(-G)
+
+gdat<-as(as.matrix(Gn),"SnpMatrix")
+
+svg(paste0("../../output/plots/Haploview/Haploview_across_traits.svg"), width = 7, height = 5)
+MyHeatmap <- 
+LDheatmap(gdat,
+          genetic.distances=unique(filterSnp$pos), 
+          color = rev(brewer.pal(9, name = "Blues")), 
+          title = "Haplotype across traits", 
+          SNP.name = filterSnp$snp,
+          geneMapLabelX = F,
+          flip = T)
+dev.off()
+```
+
+
+
+

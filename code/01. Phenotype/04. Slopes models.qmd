@@ -1,0 +1,170 @@
+---
+title: "04. Slopes models"
+format: html
+editor: visual
+---
+
+# Packages
+
+```{r include  = FALSE}
+library(tidyverse)
+library(tidybayes)
+library(extrafont)
+rstan_options(auto_write = TRUE, silent = TRUE)
+options(mc.cores = parallel::detectCores())
+# Colors from MetBrewer
+clrs <- MetBrewer::met.brewer("Java")
+
+loadfonts(device = c("all", "pdf", "postscript", "win"))
+`%nin%` <- Negate(`%in%`)
+# Custom ggplot theme to make pretty plots
+# Get the font at https://fonts.google.com/specimen/Jost
+theme_nice <- function() {
+  theme_minimal(base_family = "Jost") +
+    theme(panel.grid.minor = element_blank(),
+          plot.title = element_text(family = "Jost", face = "bold"),
+          axis.title = element_text(family = "Jost Medium"),
+          strip.text = element_text(family = "Jost", face = "bold",
+                                    size = rel(1), hjust = 0),
+          legend.position = "top",
+          axis.line = element_line(),
+          plot.background = element_rect(fill = "white"),
+          axis.text = element_text(size = 12),
+          strip.background = element_rect(fill = "grey80", color = NA)
+          )
+}
+```
+
+# Data
+
+```{r}
+phenotypes <- readRDS("../../output/model output/phenotypes_distribution_moments.RData")
+# Load FW model
+fw <- readRDS("../../output/model output/fw_slope.RData")
+# Get model quantities
+dataFW <- 
+data.frame(E = fw$ENV, 
+           G = fw$VAR,
+           y = fw$y, 
+           yhat = rowMeans(fw$yhat)
+           ) %>% 
+  # Join environmental index estimates
+  left_join(
+    data.frame(E = fw$ENVlevels, 
+               .ei = rowMeans(fw$h)
+               ), 
+    by = join_by(E)) %>% 
+  # Join slope estimates
+  left_join(
+    data.frame(G = fw$VARlevels, 
+               .slope = rowMeans(fw$b) + 1
+               ), 
+    by = join_by(G))  
+
+```
+
+```{r}
+# High yielding environments
+mod_q975 <- brm(
+  prior = c(prior_string("uniform(-10, 10)", class = "Intercept", lb = -10, ub = 10),
+            prior_string("normal(0, 0.1)", class = "b") 
+            ),
+     bf(q975 ~ slope),
+     chains = 4,
+     warmup = 5000,
+     iter = 10000, 
+     data = phenotypes, 
+     control = list(adapt_delta = 0.95),
+     family = Gamma(link = "log")
+     )
+
+#performance::compare_performance(mod_q975, mod_q050_lin)
+
+
+# Low yielding environments
+mod_q050 <- brm(
+  prior = c(prior_string("uniform(-10, 10)", class = "Intercept", lb = -10, ub = 10),
+            prior_string("normal(0, 0.1)", class = "b") 
+            ),
+     bf(q050 ~ slope),
+     chains = 4,
+     warmup = 5000,
+     iter = 10000, 
+     data = phenotypes, 
+     control = list(adapt_delta = 0.95),
+     family = Gamma(link = "log")
+     )
+
+#saveRDS(mod_q050, "../../output/model output/model_q050_slopes.RData")
+
+```
+
+```{r}
+#mod_q050 <- readRDS("../../output/model output/model_q050_yor.RData")
+
+newdata <- expand_grid(slope = seq(min(mod_q050$data$slope), 
+                                  max(mod_q050$data$slope), 
+                                  length.out = 60
+                                  )
+                        )
+
+# get predictions
+preds <- add_predicted_draws(mod_q050, 
+                             newdata = newdata, value = ".predicted") %>% 
+  summarise(.groups = "keep",
+            q050 = mean(.predicted), 
+            q975 = quantile(.predicted, probs = .975), 
+            q025 = quantile(.predicted, probs = 0.025))
+
+newdata2 <- expand_grid(slope = seq(min(mod_q975$data$slope), 
+                                  max(mod_q975$data$slope), 
+                                  length.out = 60
+                                  )
+                        )
+
+# get predictions
+preds2 <- add_predicted_draws(mod_q975, 
+                             newdata = newdata, value = ".predicted") %>% 
+  summarise(.groups = "keep",
+            q050 = mean(.predicted), 
+            q975 = quantile(.predicted, probs = .975), 
+            q025 = quantile(.predicted, probs = 0.025))
+
+
+p <- 
+ggplot()+
+  geom_vline(xintercept = 1, linetype = "dashed", linewidth = 1, color = clrs[5])+
+  geom_point(data = dataFW, aes(x = .slope, y = y), shape = 21, alpha = 0.01, fill = "grey30")+
+  # High yielding environments
+  geom_point(data = phenotypes,
+             aes(x = slope, y = q975), alpha = .6, shape = 21, size=3, fill = clrs[3])+
+  
+  geom_line(data = preds2, aes(x = slope,
+                              y = q050), linewidth = 1)+
+  geom_ribbon(data = preds2, aes(x = slope,
+                                 ymax = q975, ymin = q025), alpha = 0.1)+
+  
+  
+  # Low yielding environments
+  geom_point(data = phenotypes,
+             aes(x = slope, y = q050), alpha = .6, shape = 21, size=3, fill = clrs[3])+
+
+  geom_line(data = preds, aes(x = slope,
+                              y = q050), linewidth = 1)+
+
+  geom_ribbon(data = preds, aes(x = slope,
+                                 ymax = q975, ymin = q025), alpha = 0.1)+
+  
+
+  labs(x = expression("Yield phenotypic plasticity"), 
+       y = expression("Grain yield (Mg"~ha^-1~")")
+       )+
+  theme_nice()
+p
+```
+```{r fig.width=20, fig.height = 5}
+pyor <- ggpubr::ggarrange(p1,p2, p3, p4, nrow = 1, labels = "AUTO")
+
+ggsave(plot = pyor, "../../output/plots/paper/phenotype_yor.png", width = 20, height = 5)
+```
+

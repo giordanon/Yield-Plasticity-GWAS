@@ -1,0 +1,230 @@
+---
+title: "Heritability"
+format: html
+editor: visual
+---
+
+# Heritability
+
+```{r include = FALSE}
+suppressWarnings(source("../functions.R"))
+```
+
+## Load data
+
+```{r message = FALSE}
+dataVPT <- read_csv("../../data/phenotypes/dataVPT.csv") %>% 
+  select(G, E, R, GY) %>% 
+  # filter data with 4 reps only
+  #filter(R <= 4) %>% 
+  mutate(R = as.factor(R))
+
+h2data <- 
+left_join(by = join_by(G),
+  dataVPT,
+  read.csv("../../data/phenotypes/var_traits_final_YOR.csv")[, c("G", "YOR")] %>% 
+  # String operations to merge with genotype data
+  mutate(.,
+         G = str_replace_all(G, " ", "_"), 
+         G = str_replace_all(G, "/", "-"), 
+         G = str_replace_all(G, "'", ""), 
+         G = str_replace_all(G, "SNOWMASS_2.0", "SNOWMASS_2"), 
+         G = str_replace_all(G, "BAKER_S_ANN", "BAKERS_ANN"), 
+         G = str_replace_all(G, "SMITH_S_GOLD", "SMITHS_GOLD")
+         ) %>% 
+  # These cultivars don't have marker data
+  filter(G %nin% c("AGSECO_7853", "CSU_BLEND09", "JAG,2137", "JEI_110",
+                   "KALVESTA", "OK05312", "SY_LLANO","TAM_113","TONKAWA")) 
+  ) %>% 
+  drop_na(YOR) %>% 
+  mutate_if(is.character, as.factor)
+```
+
+# Mixed-Effects model to calculate H2
+
+```{r}
+years <- seq(1989	, max(h2data$YOR))
+
+H2 <- matrix(NA,nrow = 100, ncol = 2)
+
+H2 <- data.frame(.h2 = rep(NA, 100), 
+                 .yor = rep(NA, 100)) %>% 
+  mutate(.h2 = as.double(.h2), 
+         .yor = as.double(.yor))
+
+window_size = 10
+
+# Initialize the index
+i <- 1
+# Loop through the vector
+while (i <= (length(years) - window_size + 1)) {
+  # Get the current window
+  window <- years[i:(i + window_size - 1)]
+  
+  dat <- h2data %>% 
+   filter(YOR %in% window) %>% 
+   nest(.by = "E") %>%
+   mutate(n = map_dbl(data, ~nrow(unique(.[,"G"]))
+                      ), 
+          nRep = map_dbl(data, ~nrow(unique(.[,"R"]))
+                      ), 
+          ) %>%
+    # Filter environments with at least 2 genotypes tested
+    filter(n>10 & nRep>2) %>% 
+    unnest(data)
+  
+  envs <- unique(as.character(dat$E))
+  temph2 <- c()
+  
+  for (e in 1:100){
+    
+    sample <- sample(envs, 10)
+    
+    dat2 <- dat %>% filter(E %in% sample)
+    
+  
+    mod <- lmer(GY ~ (1|G) + (1|E:R) + (1|E) + (1|G:E), data = dat2)
+
+    #  Compute statistics
+  	varcorr <- VarCorr(mod)
+  	varErr <- attr(varcorr,'sc')^2
+  	varG <- as.vector(varcorr$'G')
+  	varGE <- as.vector(varcorr$'G:E')
+  	nRep <- length(na.omit(unique(dat2$R)))
+  	nEnv <- length(unique(dat2$E))
+    
+    .h2 <- varG/(varG + varGE/nEnv + varErr/(nRep*nEnv))
+    
+    temph2 <- c(temph2, .h2)
+  }
+
+
+  
+  H2[i, ".h2"] <- mean(temph2)
+  # Average year of the window
+  H2[i,".yor"] <- window[5]
+  print(window)
+  # Increment the index
+  i <- i + 1
+}
+ 
+plot(H2$.yor, H2$.h2)
+lines(na.omit(H2$.yor), predict(lm(data = H2, .h2~.yor)))
+
+```
+
+# FW equation to calculate H2
+
+Use posterior distribution of variance estimates to calculate h2
+
+```{r include = FALSE}
+years <- seq(1989	, max(h2data$YOR))
+
+H2 <- matrix(NA,nrow = 100, ncol = 2)
+
+H2 <- data.frame(.h2 = rep(NA, 100), 
+                 .h2pp = rep(NA, 100), 
+                 .yor = rep(NA, 100)) %>% 
+  mutate(.h2 = as.list(.h2),
+         .h2pp = as.list(.h2),
+         .yor = as.double(.yor))
+
+window_size = 10
+
+# Initialize the index
+i <- 1
+# Loop through the vector
+while (i <= (length(years) - window_size + 1)) {
+  # Get the current window
+  window <- years[i:(i + window_size - 1)]
+  
+  dat <- h2data %>% filter(YOR %in% window)
+  
+  suppressMessages(
+  # Here goes function to calculate h2
+  fw <- FW(y= dat$GY,
+             VAR= dat$G, 
+             ENV=dat$E,
+             method="Gibbs",
+             nchain = 1, 
+             seed = 123,#c(rep(123, 3)),
+             burnIn = 2000, 
+             nIter = 5000)
+  )
+  
+  load(file='samps.rda')
+  
+  ng <- length(fw$VARlevels)
+  ne <- length(fw$ENVlevels)
+  # Get estimates from the entire posterior distribution
+  var_g <- c(samps[[1]][,"var_g"])#, samps[[2]][,"var_g"], samps[[3]][,"var_g"])
+  var_b <- c(samps[[1]][,"var_b"])#, samps[[2]][,"var_b"], samps[[3]][,"var_b"])
+  #var_h <- c(samps[[1]][,"var_h"], samps[[2]][,"var_h"], samps[[3]][,"var_h"])
+  var_e <- c(samps[[1]][,"var_e"])#, samps[[2]][,"var_e"], samps[[3]][,"var_e"])
+
+  var_g <- var_g
+  var_b <- var_b#/ng
+  #var_h <- var_h/ne
+  var_e <- var_e#/(nrow(dat) - (ng+ne))
+  
+  .h2 <- var_g/ mapply(sum, var_g, var_b, var_e)
+  .h2pp <- var_b/ mapply(sum, var_g, var_b, var_e)
+  
+  H2$.h2[[i]] <- list(.h2)
+  H2$.h2pp[[i]] <- list(.h2pp)
+  # Average year of the window
+  H2[i,".yor"] <- window[5]
+  print(window)
+  # Increment the index
+  i <- i + 1
+}
+
+
+# Save entire h2 posterior
+saveRDS(drop_na(H2), "../../output/model output/h2_10_year_rolling_avg_h2_posterior2.csv")
+```
+
+```{r include = FALSE}
+H2 <- readRDS("../../output/model output/h2_10_year_rolling_avg_h2_posterior2.csv")
+
+
+H2data <- 
+H2 %>% 
+  drop_na() %>% 
+  unnest(.h2, .h2pp) %>% 
+  unnest(.h2, .h2pp) %>% 
+  group_by(.yor) %>% 
+  mutate(mean = mean(.h2))
+
+p <- 
+H2data %>% 
+  ggplot(aes(x = .yor, y = .h2))+
+  geom_point(position = position_jitter(width = 1),  shape = 21, alpha = 0.05, fill = "grey30")+
+  geom_point(aes(x = .yor, y = mean), alpha = 1, shape = 21, size=3, fill = "white")+
+  # Annotate H2 values
+  annotate(
+    geom = "curve", x = 1997, y = 0.33, 
+    xend = round(unique(min(H2data$.yor)),2), 
+    yend = round(unique(max(H2data$mean)),3), 
+    curvature = .3, arrow = arrow(length = unit(2, "mm"))
+  ) +
+  annotate(geom = "text", x = 1997.3, y = 0.33, label = round(unique(max(H2data$mean)),2), hjust = "left")+
+  annotate(
+    geom = "curve", x = 2015, y = 0.25, 
+    xend = round(unique(max(H2data$.yor)),2), 
+    yend = round(unique(min(H2data$mean)),3), 
+    curvature = .3, arrow = arrow(length = unit(2, "mm"))
+  ) +
+  annotate(geom = "text", x = 2014.7, y = 0.26, label = round(unique(min(H2data$mean)),2), hjust = "left")+
+  
+  
+  labs(x = "Year of release", y = "Heritability of yield")+
+  scale_y_continuous(breaks = seq(0, 0.7, 0.05))+
+  scale_x_continuous(breaks = seq(1960, 2030, 5), limits = c(1989, 2020))+
+  theme_nice()+
+  theme(axis.text.x = element_text(size=12))
+p
+
+#ggsave(plot = p, filename = "../../output/plots/paper/h2_FW_posterior.png")
+saveRDS(p, "../../output/plots/paper/h2_plot.RData")
+```

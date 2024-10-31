@@ -1,0 +1,100 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+```{r include = FALSE}
+library(tidyverse)
+library(GAPIT)
+#library(gwaspr)
+library(extrafont)
+loadfonts(device = c("all", "pdf", "postscript", "win"))
+`%nin%` <- Negate(`%in%`)
+# Custom ggplot theme to make pretty plots
+# Get the font at https://fonts.google.com/specimen/Jost
+theme_nice <- function() {
+  theme_minimal(base_family = "Jost") +
+    theme(panel.grid.minor = element_blank(),
+          plot.title = element_text(family = "Jost", face = "bold"),
+          axis.title = element_text(family = "Jost Medium"),
+          strip.text = element_text(family = "Jost", face = "bold",
+                                    size = rel(1), hjust = 0),
+          strip.background = element_rect(fill = "grey80", color = NA))
+}
+```
+
+# Phenotype
+
+```{r}
+Y <- readRDS("../../output/model output/phenotypes_distribution_moments.RData")
+```
+
+# Genotype
+
+```{r}
+G <- data.table::fread("../../data/genotypes/genotype_data_KNNimputed_fromMLC80_maf05_maxhet_5.hmp.txt", 
+                       header = FALSE)
+
+names <- 
+  G[1,12:251] %>% 
+  pivot_longer(cols = everything(), 
+               names_to = "var_no",
+               values_to = "G") %>%
+  filter(G %in% Y$G)
+
+
+G1 <- 
+  G %>% 
+  dplyr::select(paste0("V", 1:11),names$var_no) %>% 
+  mutate(.,
+         V1 = case_when(V1 == "rs#"~"rs",T~V1),
+         V6 = case_when(V6 == "assembly#"~"assembly",T~V6)
+         ) %>%
+  as.data.frame()
+```
+
+# Covariate
+
+```{r}
+#Load numeric genotype
+Gn <- data.table::fread("../../data/genotypes/genotype_data_KNNimputed_fromMLC80_maf05_maxhet_5_numeric.hmp.txt", 
+                       header = T) %>% 
+  as.data.frame() %>% 
+  select(`<Marker>`,S2A_525068) %>% 
+  rename_all(~c("G", "CV")) %>% 
+  filter(G %in% names$G)
+```
+
+# GAPIT
+
+```{r include = FALSE, message = FALSE, warning = FALSE}
+# Run for loop using multiple PC's
+for (i in 3:20){
+  GWAS <- GAPIT(
+    Y = Y,
+    G = G1,
+    CV = Gn,
+    PCA.total = i,
+    model = "FarmCPU")
+  
+  output_dir <- paste0("../../output/GWAS_FarmCPU_Cov/PC_",i,"/")
+  
+  if (dir.exists(output_dir)==FALSE){
+    dir.create(output_dir)
+    }
+  # List GAPIT files
+  files <- list.files(pattern = "\\.(pdf|csv)$", full.names = TRUE)
+  # Move the files to the destination directory
+  file.rename(files, file.path(output_dir, basename(files)))
+}
+```
+
+```{r}
+GWAS <- GAPIT(
+    Y = Y,
+    G = G1,
+    Model.selection = TRUE,
+    PCA.total = 10,
+    model = "FarmCPU")
+```

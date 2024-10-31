@@ -1,0 +1,33 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+```{r}
+sigSNP %>% 
+  filter(trait == "mean") %>% 
+  pull(snp)
+```
+
+```{r}
+cbind(
+  pdata[ol@from,c("trait","snp" ,"effect", "logp", "maf")],
+  wg[ol@to,c("Accession","Chromosome")]) %>% 
+  unique() %>% 
+  write.csv("../../output/table1_gene_accessions.csv")
+```
+
+```{r}
+cbind(
+  pdata[ol@from,c("trait","snp" ,"effect", "logp", "maf")],
+  wg[ol@to,c("Accession","Chromosome")]) %>% 
+  unique() %>% 
+  mutate(effect = abs(effect)) %>% 
+  nest(.by = "trait") %>% 
+  mutate(data = map(data, ~arrange(.,desc(effect))) )%>% 
+  unnest(data)%>% 
+  write.csv("../../output/table1_gene_accessions.csv")
+```
+
+
+

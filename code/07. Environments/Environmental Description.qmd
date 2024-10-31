@@ -1,0 +1,180 @@
+
+```{r include  = FALSE}
+suppressWarnings(source("../functions.R"))
+library(RColorBrewer)
+colors <- brewer.pal(n = 11, name = "RdBu")  # Use 11 for a smoother gradient
+library(metrica)
+library(rpart)
+library(rpart.plot)
+```
+
+```{r}
+dataVPT <- read.csv("../../data/phenotypes/dataVPT.csv") %>% 
+  dplyr::select(G, E,L, GY) %>% 
+  drop_na()
+```
+
+```{r}
+# Load FW model
+fw <- readRDS("../../output/model output/fw_slope.RData")
+
+dataFW <- data.frame(E = fw$ENVlevels, 
+                     .ei = rowMeans(fw$h)
+                     ) 
+
+env <- readRDS("../../data/environment/weather_daymet.RData") %>% 
+  mutate(E = paste0(year(Y), " ", L))
+
+dataEnv <- 
+  left_join(dataVPT, dataFW) %>% 
+  left_join(env) %>% 
+  select(E,L,LOCATION, .ei,LON, LAT, daymet, GENOTYPE, MATURITY) %>% 
+  unique()
+```
+
+Get anthesis dates
+
+```{r}
+dataEnv <- anthesisDate(dataEnv, 0)
+```
+
+Get weather summaries
+
+```{r}
+df_sum <- weather_summaries(dataEnv, tminCP = 4.5, tminGF = 0,
+                            minGDU_CP = 300, maxGCU_CP = 100,
+                            minGDU_GF = 100, maxGCU_GF = 600) %>% 
+  # convert anthesis date to DOY
+  mutate(ANTHESIS = yday(ANTHESIS)) %>% 
+  #rename(E = LOCATION) %>% 
+  # Remove genotype column because I am using the default
+  dplyr::select(-GENOTYPE) %>% 
+  select(-c(ETE_CP_GF))
+  
+
+saveRDS(df_sum, file = "../../data/environment/weather_summaries_daymet_dataVPT.RData")
+```
+
+```{r}
+weather <- readRDS("../../data/environment/weather_summaries_daymet_dataVPT.RData") 
+```
+Table describing weather
+
+```{r}
+weather %>% select(-ANTHESIS, -LOCATION) %>% 
+  pivot_longer(everything()) %>% 
+  group_by(name) %>% 
+  summarise(mean = mean(value, na.rm=T), 
+            min = min(value, na.rm=T), 
+            max = max(value, na.rm=T)) %>% 
+  write.csv("../../output/plots/environment_description_table.csv", row.names = F)
+```
+
+
+Get data for regression tree
+
+```{r}
+dataModel <- left_join(dataEnv %>% dplyr::select(-ANTHESIS), weather, by = join_by(LOCATION)) %>% 
+  select(.ei, ANTHESIS:VPD_GF) %>% 
+  select(-contains("VPD"), -ANTHESIS)
+```
+
+Grid search of regression tree hyper parameters
+
+```{r}
+n <- nrow(dataModel)
+
+gridS <- 
+expand_grid(minsplit = round(seq(0.05, 0.30, 0.1)*n,0), # from 1 to 30 % of the observations
+            minbucket = round(seq(0.05, 0.30, 0.1)*n/3,0),
+            maxcompete = 2:6, 
+            maxsurrogate = 2:6,
+            maxdepth = 2:6)
+
+rPart <- 
+  gridS[,] %>% 
+  mutate(.,
+         mod = pmap(list(minsplit, maxcompete, maxsurrogate, maxdepth),
+                    function(minsplit, maxcompete, maxsurrogate, maxdepth){
+                      # Run regression tree
+                      mod <- rpart(.ei ~ .,
+                                   data = dataModel, 
+                                   control = list(minsplit = minsplit,
+                                                  maxcompete = maxcompete,
+                                                  maxsurrogate = maxsurrogate,
+                                                  maxdepth = maxdepth
+                                                  )
+                                   )
+                      # Obtain prediction metrics
+                      m <- metrica::metrics_summary(obs = mod$y, 
+                                                    pred = predict(mod),
+                                                    type = "regression", 
+                                                    metrics_list = c("B1", "R2", "RMSE")) %>% 
+                        mutate(Score = round(Score,2)) %>% 
+                        pivot_wider(names_from = Metric, values_from = Score)
+                      return(m)
+                    }
+                    )
+         ) %>% 
+  unnest(mod)
+
+saveRDS()
+# Select hyperparameters that give the highest R2 and lowest RMSE
+hyperPar <- 
+  rPart %>% 
+  filter(R2 == max(R2) ) %>% 
+  filter(minsplit == max(minsplit)) %>%
+  filter(minbucket == max(minbucket)) %>% 
+  filter(maxcompete == min(maxcompete)) %>% 
+  filter(maxsurrogate == min(maxsurrogate)) %>% 
+  filter(maxdepth == min(maxdepth))
+```
+
+```{r}
+mod <- rpart(.ei ~ .,
+             data = dataModel, 
+             control = list(minsplit = hyperPar$minsplit,
+                            minbucket = hyperPar$minbucket,
+                            maxcompete = hyperPar$maxcompete,
+                            maxsurrogate = hyperPar$maxsurrogate,
+                            maxdepth = hyperPar$maxdepth)
+             )
+```
+
+
+```{r}
+svg("../../output/plots/paper/rpart.png", width = 5, height = 5)
+rpart.plot(mod, box.palette="RdBu", shadow.col="gray", nn=TRUE)
+dev.off()
+```
+
+```{r}
+dataPlot <- 
+dataModel %>% 
+  transmute(.,
+            .ei = .ei, 
+            PP = PP_CP+PP_GF, 
+            PQ = PQ_CP
+            )
+
+pe2<- 
+ggplot()+
+  geom_hline(aes(yintercept = median(dataPlot$PP, na.rm=T)), size = 1, linetype = "dashed")+
+  geom_vline(aes(xintercept = median(dataPlot$PQ, na.rm=T)), size = 1, linetype = "dashed")+
+  geom_point(data = dataPlot, aes(x = PQ, y = PP, fill = .ei, size = .ei), shape = 21, alpha = 1)+
+  scale_fill_gradientn(colors = colors) +
+  guides(fill = guide_legend(title = expression("Environmental Index (Mg"~ha^-1~")")), 
+         size = guide_legend(title = expression("Environmental Index (Mg"~ha^-1~")"))
+         )+
+  labs(x = expression("Photothermal quotient (Mj"~Cd^-1~")"), 
+       y = "Cumulative precipitation (mm)")+
+  theme_nice()
+
+ggsave(plot = pe2, "../../output/plots/paper/PP_PQ.png", width = 5, height = 5)
+```
+
+
+
+
+
+

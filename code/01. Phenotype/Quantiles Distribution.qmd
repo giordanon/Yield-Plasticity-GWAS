@@ -1,0 +1,74 @@
+
+# Packages
+
+```{r include  = FALSE}
+suppressWarnings(source("../functions.R"))
+```
+
+# Load data
+
+
+```{r}
+# Load FW model
+fw <- readRDS("../../output/model output/fw_slope.RData")
+
+mu <- mean(fw$mu)
+
+data2 <- read.csv("../../data/phenotypes/var_traits_final_YOR.csv")[, c("G", "YOR")] %>% 
+  rename_all(~c("G", ".yor")) %>% 
+  mutate(.,
+         G = str_replace_all(G, " ", "_"), 
+         G = str_replace_all(G, "/", "-"), 
+         G = str_replace_all(G, "'", ""), 
+         G = str_replace_all(G, "SNOWMASS_2.0", "SNOWMASS_2"), 
+         G = str_replace_all(G, "BAKER_S_ANN", "BAKERS_ANN"), 
+         G = str_replace_all(G, "SMITH_S_GOLD", "SMITHS_GOLD")
+         ) %>% 
+  # These cultivars don't have marker data
+  filter(G %nin% c("AGSECO_7853", "CSU_BLEND09", "JAG,2137", "JEI_110",
+                   "KALVESTA", "OK05312", "SY_LLANO","TAM_113","TONKAWA")) %>% 
+  drop_na() %>% 
+  mutate(.yor = .yor - min(.yor)) %>% 
+  left_join(readRDS("../../output/model output/phenotypes_distribution_moments.RData")) %>% 
+  mutate(mean = mean+mu)
+
+dataVPT <- read.csv("../../data/phenotypes/dataVPT.csv")
+
+#summary(data2)
+```
+
+
+```{r fig.width=4, fig.height=4}
+colors <- RColorBrewer::brewer.pal(n = 11, name = "RdBu")  # Use 11 for a smoother gradient
+
+data2 <- 
+data2 %>% 
+  pivot_longer(cols = c(q975, q050, mean)) %>% 
+  mutate(.,
+         
+         name = case_when(name == "mean" ~ "Mean yield",
+                          name == "q050" ~ "5th yield percentile",
+                          name == "q975" ~ "95th yield percentile"), 
+         name = fct_relevel(name, c("5th yield percentile", "Yield Mean", "95th yield percentile"))
+         )
+
+p <- 
+
+  ggplot()+
+  geom_histogram(data = data2,aes(x = value, fill =name), alpha = 0.5, color = "black")+
+  
+  labs(x = expression("Grain yield (Mg"~ha^-1~")"))+
+  scale_fill_manual(values =  c("#B2182B","#2166AC","#F7F7F7"))+
+  guides(fill = guide_legend(title = ""))+
+
+  #scale_y_continuous(breaks = seq(0, 0.7, 0.05))+
+  #scale_x_continuous(breaks = seq(1960, 2030, 5), limits = c(1989, 2020))+
+  theme_nice()+
+  theme(axis.text.x = element_text(size=12), 
+        legend.direction = "vertical")
+
+ggsave(plot = p, filename = "../../output/plots/paper/quantiles_distribution.svg", width = 4, height = 4, dpi = 600)
+
+```
+
+

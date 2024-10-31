@@ -1,0 +1,405 @@
+---
+title: "Slope FW v yield"
+format: html
+editor: visual
+---
+
+```{r include = FALSE}
+suppressWarnings(source("../functions.R"))
+```
+
+# Yield plasticity v yield per se
+
+This codes models and plots the association of yield perse and yield plasticity. Yield plasticity is calculated as the slope of a reaction norm
+
+```{r}
+# Load phenotypes
+phenotypes <- readRDS("../../output/model output/phenotypes_distribution_moments.RData")
+
+# Load FW model
+fw <- readRDS("../../output/model output/fw_slope.RData")
+# Get model quantities
+dataFW <- 
+data.frame(E = fw$ENV, 
+           G = fw$VAR,
+           y = fw$y, 
+           yhat = rowMeans(fw$yhat)
+           ) %>% 
+  # Join environmental index estimates
+  left_join(
+    data.frame(E = fw$ENVlevels, 
+               .ei = rowMeans(fw$h)
+               ), 
+    by = join_by(E)) %>% 
+  # Join slope estimates
+  left_join(
+    data.frame(G = fw$VARlevels, 
+               .slope = rowMeans(fw$b) + 1
+               ), 
+    by = join_by(G))
+
+
+summary(mean(fw$mu) + dataFW$.ei)
+max(dataFW$.slope)/min(dataFW$.slope)
+```
+
+## Co-founded with enhanced management?
+
+```{r}
+dataVPT <- read.csv("../../data/phenotypes/dataVPT.csv")
+
+
+dataVar <- cbind(dataFW[,5:6], dataVPT) %>% 
+  mutate(Y = as.double(Y)-2000, 
+         .ei = .ei*1000
+         ) %>% 
+  select(.ei, Y) %>% 
+  unique()
+
+mod_var <- brm(
+  prior = c(prior_string("normal(0, 10)", class = "Intercept"),
+            prior_string("normal(0, 1)", class = "b") 
+            #prior_string("gamma(2, 1)", class = "sigma")
+            ),
+     bf(.ei ~ Y, 
+        sigma ~ Y),
+     chains = 4,
+     warmup = 5000,
+     iter = 10000, 
+     data = dataVar, 
+     control = list(adapt_delta = 0.95),
+     family = gaussian(link = "identity")
+     )
+
+saveRDS(mod_var, "../../output/model output/model_EI_year_trial.RData")
+```
+
+```{r}
+mod_var <- readRDS("../../output/model output/model_EI_year_trial.RData")
+
+
+newdata <- expand_grid(Y = seq(min(mod_var$data$Y), 
+                               max(mod_var$data$Y), 
+                                  length.out = 60
+                                  )
+                      )
+
+# get predictions
+preds <- add_predicted_draws(mod_var, 
+                             newdata = newdata, value = ".predicted") %>% 
+  summarise(.groups = "keep",
+            q050 = mean(.predicted), 
+            q975 = quantile(.predicted, probs = .975), 
+            q025 = quantile(.predicted, probs = 0.025))
+
+p <- 
+ggplot()+
+  geom_point(data = dataVar, aes(x = Y+2000, y = .ei + mean(fw$mu)*1e3), shape = 21, alpha = 0.3, fill = "grey40")+
+
+  geom_line(data = preds, aes(x = Y+2000,
+                              y = q050 + mean(fw$mu)*1e3), linewidth = 1)+
+
+  geom_ribbon(data = preds, aes(x = Y+2000,
+                                 ymax = q975 + mean(fw$mu)*1e3, ymin = q025 + mean(fw$mu)*1e3), alpha = 0.1)+
+  #scale_y_continuous(limits = c(0,10))+
+  labs(x = expression("Year of trial"), 
+       y = expression("Environmental index (kg"~ha^-1~")")
+       )+
+  scale_y_continuous(limits = c(0,9000))+
+  theme_nice()+
+  theme(plot.background = element_rect(fill = "white", color = "white"))
+
+
+p
+
+
+# plot SD of yield as affected by Y
+var_preds <- 
+posterior_samples(mod_var, subset = 1:1000) %>% 
+  rowwise() %>% 
+  mutate(.,
+         #newdata = list(seq(min(dataVar$Y), max(dataVar$Y), 1)),
+         new = list(data.frame(.predicted = b_sigma_Intercept + b_sigma_Y * 1:22) %>% 
+                     rowid_to_column("Y")
+                   )
+         ) %>% 
+  unnest(new) %>% 
+  
+  group_by(Y) %>% 
+  summarise(.groups = "keep",
+            q050 = mean(.predicted), 
+            q975 = quantile(.predicted, probs = .975), 
+            q025 = quantile(.predicted, probs = 0.025))
+
+p1 <- 
+ggplot()+
+
+  geom_line(data = var_preds, aes(x = Y+2000,
+                              y = sqrt(q050)), linewidth = 1)+
+
+  geom_ribbon(data = var_preds, aes(x = Y+2000,
+                                 ymax = sqrt(q975), ymin = sqrt(q025)), alpha = 0.1)+
+  labs(x = expression("Year of trial"), 
+       y = expression("Standard Deviation of Environmental Index (kg"~ha^-1~")")
+       )+
+  scale_y_continuous(limits = c(0, 9))+
+  theme_nice()+
+  theme(plot.background = element_rect(fill = "white", color = "white"))
+
+
+p1
+```
+
+```{r fig.width=10, fig.height = 5}
+pei <- ggpubr::ggarrange(p,p1,nrow = 1, labels = "AUTO")
+
+ggsave(plot = pei, "../../output/plots/paper/EI and year of trial.png", width = 10, height = 5)
+```
+
+# Yield and EI
+
+```{r}
+p1 <- 
+dataFW %>% 
+  ggplot()+
+  geom_abline(intercept = 0, slope = 1, linewidth = 1, linetype = "dashed", color = "black")+
+
+  geom_point(aes(x = .ei + mean(fw$mu), y = y), shape = 21, alpha = 0.01, fill = "grey30")+
+  geom_line(aes(x = .ei + mean(fw$mu), y = yhat, group = G), alpha = 0.1)+
+  geom_point(data = dataFW %>% 
+              filter(.slope %in% c(min(dataFW$.slope), max(dataFW$.slope))),
+              aes(x = .ei + mean(fw$mu), 
+                  y = y, 
+                  fill = as.factor(round(.slope, 2)),
+                  group = G),
+            alpha = 1, shape = 21, size=3)+
+  geom_line(data = dataFW %>% 
+              filter(.slope %in% c(min(dataFW$.slope), max(dataFW$.slope))),
+              aes(x = .ei + mean(fw$mu), 
+                  y = yhat, 
+                  color = as.factor(round(.slope, 2)),
+                  group = G),
+            alpha = 1, linewidth = 1)+
+  
+  scale_color_manual(values = c(rojo, azul))+
+  scale_fill_manual(values = c(rojo, azul))+
+  scale_x_continuous(limits = c(0,10))+
+  scale_y_continuous(limits = c(0,10))+
+  
+  guides(fill = guide_legend(title = "Yield plasticity", position = "inside"), 
+         color = guide_legend(title = "Yield plasticity", position = "inside"))+
+  
+  labs(x = expression("Environmental index (Mg"~ha^-1~")"), 
+       y = expression("Grain yield (Mg"~ha^-1~")")
+       )+
+  theme_nice()+
+  theme(legend.position.inside = c(0.2, 0.9))
+
+p1
+
+#ggsave(plot = p, "../../output/plots/paper/Yield v EI.png", dpi = 600, width = 5, height = 5)
+```
+
+# Yield and plasticity
+
+```{r}
+# High yielding environments
+mod_q975 <- brm(
+  prior = c(prior_string("uniform(-10, 10)", class = "Intercept", lb = -10, ub = 10),
+            prior_string("normal(0, 0.1)", class = "b") 
+            ),
+     bf(q975 ~ slope),
+     chains = 4,
+     warmup = 5000,
+     iter = 10000, 
+     data = phenotypes, 
+     control = list(adapt_delta = 0.95),
+     family = Gamma(link = "log")
+     )
+
+saveRDS(mod_q975, "../../output/model output/model_q975_slopes.RData")
+
+#performance::compare_performance(mod_q975, mod_q050_lin)
+
+# Low yielding environments
+mod_q050 <- brm(
+  prior = c(prior_string("uniform(-10, 10)", class = "Intercept", lb = -10, ub = 10),
+            prior_string("normal(0, 0.1)", class = "b") 
+            ),
+     bf(q050 ~ slope),
+     chains = 4,
+     warmup = 5000,
+     iter = 10000, 
+     data = phenotypes, 
+     control = list(adapt_delta = 0.95),
+     family = Gamma(link = "log")
+     )
+
+saveRDS(mod_q050, "../../output/model output/model_q050_slopes.RData")
+
+# Low yielding environments
+mod_mean <- brm(
+  prior = c(#prior_string("uniform(-10, 10)", class = "Intercept", lb = -10, ub = 10),
+            prior_string("normal(0, 0.1)", class = "b") 
+            ),
+     bf(mean ~ slope),
+     chains = 4,
+     warmup = 5000,
+     iter = 10000, 
+     data = phenotypes, 
+     control = list(adapt_delta = 0.95),
+     family = gaussian(link = "identity")
+     )
+
+saveRDS(mod_mean, "../../output/model output/model_mean_slopes.RData")
+
+```
+
+
+```{r}
+mod_q050 <- readRDS("../../output/model output/model_q050_slopes.RData")
+
+newdata <- expand_grid(slope = seq(min(mod_q050$data$slope), 
+                                  max(mod_q050$data$slope), 
+                                  length.out = 60
+                                  )
+                        )
+
+# get predictions
+preds <- add_predicted_draws(mod_q050, 
+                             newdata = newdata, value = ".predicted") %>% 
+  summarise(.groups = "keep",
+            q050 = mean(.predicted), 
+            q975 = quantile(.predicted, probs = .975), 
+            q025 = quantile(.predicted, probs = 0.025))
+
+mod_q975 <- readRDS("../../output/model output/model_q975_slopes.RData")
+
+# get predictions
+preds2 <- add_predicted_draws(mod_q975, 
+                             newdata = newdata, value = ".predicted") %>% 
+  summarise(.groups = "keep",
+            q050 = mean(.predicted), 
+            q975 = quantile(.predicted, probs = .975), 
+            q025 = quantile(.predicted, probs = 0.025))
+
+# Mean
+mod_mean <- readRDS("../../output/model output/model_mean_slopes.RData")
+
+# get predictions
+preds3 <- add_predicted_draws(mod_mean, 
+                             newdata = newdata, value = ".predicted") %>% 
+  summarise(.groups = "keep",
+            q050 = mean(.predicted)+3.36, 
+            q975 = quantile(.predicted, probs = .975)+3.36, 
+            q025 = quantile(.predicted, probs = 0.025)+3.36)
+```
+
+```{r}
+mean <- marginaleffects::avg_slopes(mod_mean, newdata = data.frame(slope = 1)) %>% as.data.frame()
+q050 <- marginaleffects::avg_slopes(mod_q050, newdata = data.frame(slope = 1)) %>% as.data.frame()
+q975 <- marginaleffects::avg_slopes(mod_q975, newdata = data.frame(slope = 1)) %>% as.data.frame()
+
+
+label_mean <- paste0("slope = ", round(mean$estimate, 1),", c.i.= ",round(mean$conf.low, 1)," - ", round(mean$conf.high,1) )
+label_q050 <- paste0("slope = ", round(q050$estimate, 1),", c.i.= ",round(q050$conf.low, 1)," - ", round(q050$conf.high,1) )
+label_q975 <- paste0("slope = ", round(q975$estimate, 1),", c.i.= ",round(q975$conf.low, 1)," - ", round(q975$conf.high,1) )
+```
+
+
+```{r fig.width=5, fig.height=5}
+p2 <- 
+ggplot()+
+  geom_text(aes(label = label_q975, x = 0.83, y = 10), family = "Jost")+
+  geom_point(aes(x = 0.66, y = 9.9), shape = 24, size=3, fill = "white")+
+  geom_text(aes(label = label_mean, x = 0.83, y = 9), family = "Jost")+
+  geom_point(aes(x = 0.66, y = 8.9), shape = 22, size=3, fill = "white")+
+  geom_text(aes(label = label_q050, x = 0.83, y = 8), family = "Jost")+
+  geom_point(aes(x = 0.66, y = 7.9), shape = 21, size=3, fill = "white")+
+
+  
+  geom_point(data = dataFW, aes(x = .slope, y = y), shape = 21, alpha = 0.01, fill = "grey30")+
+  # High yielding environments
+  geom_point(data = phenotypes,
+             aes(x = slope, y = q975), alpha = 1, shape = 24, size=3, fill = "white")+
+  geom_point(data = phenotypes %>% 
+               filter(slope == min(slope) | slope == max(slope)) %>% 
+               mutate(Slope = as.factor(case_when(slope == min(slope) ~ round(slope, 2), T~round(slope, 2)))),
+             aes(x = slope, y = q975, fill = Slope), alpha = 1, shape = 24, size=3)+
+  
+  geom_line(data = preds2, aes(x = slope,
+                              y = q050), linewidth = 1)+
+  geom_ribbon(data = preds2, aes(x = slope,
+                                 ymax = q975, ymin = q025), alpha = 0.1)+
+  
+  
+  # Mean yielding environments
+  geom_point(data = phenotypes,
+             aes(x = slope, y = mean + 3.36), alpha = 1, shape = 22, size=3, fill = "white")+
+  geom_point(data = phenotypes %>%
+               filter(slope == min(slope) | slope == max(slope)) %>%
+               mutate(Slope = as.factor(case_when(slope == min(slope) ~ round(slope, 2), T~round(slope, 2)))),
+             aes(x = slope, y = mean+ 3.36, fill = Slope), alpha = 1, shape = 22, size=3)+
+  
+  geom_line(data = preds3, aes(x = slope,
+                              y = q050), linewidth = 1)+
+  geom_ribbon(data = preds3, aes(x = slope,
+                                 ymax = q975, ymin = q025), alpha = 0.1)+
+  
+  
+  # Low yielding environments
+  geom_point(data = phenotypes,
+             aes(x = slope, y = q050), alpha = 1, shape = 21, size=3, fill = "white")+
+  geom_point(data = phenotypes %>% 
+               filter(slope == min(slope) | slope == max(slope)) %>% 
+               mutate(Slope = as.factor(case_when(slope == min(slope) ~ round(slope, 2), T~round(slope, 2)))),
+             aes(x = slope, y = q050, fill = Slope), alpha = 1, shape = 21, size=3)+
+
+  geom_line(data = preds, aes(x = slope,
+                              y = q050), linewidth = 1)+
+
+  geom_ribbon(data = preds, aes(x = slope,
+                                 ymax = q975, ymin = q025), alpha = 0.1)+
+  guides(fill = "none")+
+  scale_fill_manual(values = c(rojo, azul))+
+
+  scale_y_continuous(limits = c(0,10))+
+  labs(x = expression("Yield phenotypic plasticity"), 
+       y = expression("Grain yield (Mg"~ha^-1~")")
+       )+
+  theme_nice()
+
+p2
+ 
+```
+
+
+
+
+
+```{r fig.width=10, fig.height = 5}
+pslopes <- 
+  ggpubr::ggarrange(p1,p2,nrow = 1, labels = "AUTO")+
+  theme(plot.background = element_rect(fill = "white", color = "white"))
+
+ggsave(plot = pslopes, "../../output/plots/paper/Yield phenotypes.png", width = 10, height = 5)
+```
+
+```{r}
+right_join(
+unique(dataVPT[,c("G", "PP_GY")]),
+unique(dataFW[,c("G", ".slope")]),by = join_by(G)) %>% 
+  drop_na() %>% 
+  ggplot(aes(x = .slope, y = PP_GY))+
+  geom_point(aes(x = .slope, y = PP_GY), alpha = 0.7, shape = 21, size=3, fill = "grey40")+
+
+  # guides(fill = guide_legend(override.aes = list(shape = 21)))+
+  # scale_fill_manual(values = c(clrs[1], clrs[2]))+
+
+  #scale_y_continuous(limits = c(0,10))+
+  labs(x = expression("Slope of reaction norm"), 
+       y = expression("Variance ratio")
+       )+
+  theme_nice()+
+  theme(plot.background = element_rect(fill = "white", color = "white"))
+```

@@ -1,0 +1,122 @@
+---
+title: "map"
+format: html
+editor: visual
+---
+
+```{r include = FALSE}
+suppressWarnings(source("../functions.R"))
+library(RColorBrewer)
+colors <- brewer.pal(n = 11, name = "RdBu")  # Use 11 for a smoother gradient
+
+library(sf)
+library(ggspatial)
+library(terra)
+library(tidyterra)
+library("ggnewscale")
+```
+
+Load data from VPT to get average EI of site and number of yield observations in each site. Can get average number of G tested
+
+```{r}
+fw <- readRDS("../../output/model output/fw_slope.RData")
+
+dataFW <- data.frame(E = fw$ENVlevels, 
+                     .ei = rowMeans(fw$h)
+                     ) 
+
+dataVPT <- read.csv("../../data/phenotypes/dataVPT.csv") %>% 
+  dplyr::select(G, E,L, GY) %>% 
+  drop_na() %>% 
+  nest(.by = "L") %>% 
+  mutate(nobs = map_dbl(data,~nrow(.))) %>% 
+  unnest(data)
+```
+
+Area planted to wheat USDA-NASS
+
+```{r}
+path = "../../data/wheat_area/clipped/"
+rastfiles <- list.files(path = path, pattern = ".TIF$", full.names=T)
+
+pa <- terra::rast(rastfiles)
+```
+
+Shapefiles of region
+
+```{r warning = FALSE}
+us <- read_sf("../../data/shapes/cb_2022_us_state_20m.shp") %>% 
+  mutate(STATE = ifelse(NAME %in% c("Kansas", "Oklahoma", "Colorado"), "TRIAL", "Other"))
+
+crs <- st_crs(us)
+
+trials <- unique(dataVPT[,c("L", "E", "nobs")]) %>% 
+  left_join(read.csv("../../data/environment/trials_coordinates.csv"), by = join_by(L)) %>% 
+  left_join(dataFW, by = join_by(E)) %>% 
+  summarise(.by = c("L", "nobs", "LON", "LAT"), 
+            .mean = mean(.ei, na.rm=T), 
+            .sd = sd(.ei, na.rm=T)
+            ) %>% 
+  #input with mean SD
+  mutate(.sd = case_when(is.na(.sd) ~ mean(.sd), T~.sd)) %>% 
+  drop_na(LON, LAT) %>% 
+  st_as_sf(coords = c("LON", "LAT"), crs = st_crs(us)) 
+
+
+us <- st_transform(x = us,crs =  st_crs(pa)) 
+trials <- st_transform(x = trials, crs =  st_crs(pa))
+```
+
+```{r fig.width = 8, fig.height = 5}
+
+map<- 
+ggplot()+
+  geom_sf(data = us, aes(fill = STATE, linewidth = STATE))+
+  scale_fill_manual(values = c("white","#d6b2b0"))+
+  guides(fill = "none", linewidth = "none")+
+  new_scale_fill() +
+  
+  geom_spatraster(data = pa, aes(fill = Class_Name)) +
+  scale_fill_manual(values = c("#216e2f"), na.value = "transparent")+
+  guides(fill = "none")+
+  new_scale_fill() +
+
+  geom_sf(data = trials %>% drop_na(.mean),  aes(size = .sd, fill = .mean), stroke = 1.0, shape = 21, alpha = 1)+
+  scale_fill_gradientn(colors = colors) +
+  
+  coord_sf(crs = crs, expand = F)+
+  ylim(c(33, 42))+ # set the y limits
+  xlim(c(-110,-92))+
+  
+  annotation_north_arrow(location = "tl", style = north_arrow_fancy_orienteering)+
+  
+  #scale_shape_manual(values = c(24,21))+
+  scale_linewidth_manual(values = c(0.5, 0.5))+
+  #scale_size(range = c(2.6, 4.0))+
+  
+  
+  #scale_color_brewer(palette = "Dark2")+
+  theme(
+    panel.background = element_rect(fill = "lightblue",
+                                    colour = "lightblue",
+                                    size = 0.5, linetype = "solid"),
+    panel.grid.major = element_line(size = 0.1), 
+    panel.grid.minor = element_blank(), 
+    panel.border = element_rect(colour = "black", fill=NA, size= 2), 
+    axis.text=element_text(size=10)
+  )+
+  guides(fill = guide_legend(title = "Environmental \nIndex (Mg/ha)", override.aes = list(size = 6, shape = 21)), 
+         size = guide_legend(title = "Environmental \nIndex SD (Mg/ha)")
+         )+
+  labs(x ="", y="")+
+  theme(panel.grid.minor = element_blank(), 
+        panel.grid.major = element_blank(),
+        legend.position = "left",
+        legend.box = "vertical",
+        plot.background = element_rect(fill = "white"), 
+        legend.title = element_text(size = 9),legend.justification.left  = "left", 
+        legend.key = element_rect(fill = "transparent", color = "transparent"))
+
+ggsave(plot = map, filename = "../../output/plots/paper/map.png", width = 8, height = 5, dpi = 600)
+
+```

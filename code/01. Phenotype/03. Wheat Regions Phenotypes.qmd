@@ -1,0 +1,345 @@
+---
+title: "Wheat Regions Phenotypes"
+format: html
+editor: visual
+---
+
+# Packages
+
+```{r include  = FALSE}
+suppressWarnings(source("../functions.R"))
+library(FW)
+```
+
+```{r warning = FALSE}
+aus <- readxl::read_excel("../../data/phenotypes/other countries/Sadras - NVT Wheat Dataset 16.10.2024.xlsx", 
+                          sheet = "Single Site Yield & Grain Qual.") %>% 
+  select(State, SiteDescription,VarietyDisplayName, "Single Site Yield") %>% 
+  mutate(Region = "Australia", 
+         YOR = as.integer(NA)) %>% 
+  filter(State != "QLD") %>% 
+  transmute(Region = Region, 
+            G1 = VarietyDisplayName,
+            E1 = paste0(SiteDescription, "_", State),
+            YOR = YOR, 
+            GY = `Single Site Yield`
+            )
+```
+
+# Load data
+
+```{r}
+dataWR <- read.csv("../../data/phenotypes/data_all_countries.csv") %>% 
+  filter(Region != "Central Great Plains") %>% 
+  select(Region, G1, E1, YOR, GY) %>% 
+  rbind(aus)
+
+dataWR %>% select(E1, Region) %>% unique() %>%  count(Region)# count(Region, G)
+```
+
+# Finlay-Wilkinson
+
+```{r}
+iter <- 5000
+burnin <- 2000
+
+fw <-
+  dataWR %>% 
+  nest(.by = "Region") %>% 
+  mutate(.,
+         fw = pmap(list(data, Region),
+                   function(data, region){
+           fw <- FW(y = data$GY,
+                    VAR = data$G1,
+                    ENV = data$E1,
+                    method ="Gibbs",
+                    nchain = 3, 
+                    seed = c(rep(123, 3)),
+                    burnIn = burnin, 
+                    nIter = iter)
+           })
+         )
+saveRDS(fw, "../../output/model output/FW_Wheat_Regions_aus.RData")
+```
+
+# Retrieve data from FW model
+
+```{r}
+fw <- readRDS("../../output/model output/FW_Wheat_Regions_aus.RData")
+
+dataFW <- 
+  fw %>% 
+  mutate(.,
+         dataFW = map(fw, function(fw){
+           dataFW <- 
+             data.frame(E = fw$ENV, 
+                        G1 = fw$VAR,
+                        y = fw$y, 
+                        yhat = rowMeans(fw$yhat)
+                         ) %>% 
+             # Join environmental index estimates
+             left_join(
+               data.frame(E = fw$ENVlevels, 
+                          .ei = rowMeans(fw$h) + mean(fw$mu)
+                          ), 
+               by = join_by(E)) %>% 
+             # Join slope estimates
+             left_join(
+               data.frame(G1 = fw$VARlevels, 
+                          .slope = rowMeans(fw$b) + 1
+                          ), 
+               by = join_by(G1)) %>%  
+           # Join mean estimates
+             left_join(
+               data.frame(G1 = fw$VARlevels, 
+                          mean = rowMeans(fw$g) + mean(fw$mu)
+                          ), 
+               by = join_by(G1))
+           })
+         ) %>% 
+  select(Region, dataFW) %>% 
+  unnest(dataFW) %>% 
+  mutate(Region = case_when(Region == "Alberta" ~ "Canada (Alberta)",
+                            Region == "Manitoba" ~ "Canada (Manitoba)",
+                            T ~ Region
+                            )
+         )
+```
+
+```{r}
+dataPoints <- 
+dataFW %>%
+  nest(.by = "Region") %>%
+  mutate(data = map(data, 
+                    ~.x %>% 
+                      filter(.slope %in% c(min(.x$.slope), max(.x$.slope))) %>% 
+                      mutate(group = case_when(.slope == min(.slope) ~ "Low", T ~ "High" ))
+                    )
+         ) %>% 
+  unnest(cols = c(data))
+```
+
+```{r fig.width= 12, fig.height=4}
+p <- 
+dataFW %>% 
+  ggplot()+
+  facet_wrap(~Region, nrow = 1)+
+  geom_point(aes(x = .ei, y = y), shape = 21, alpha = 0.1, fill = "grey30")+
+  geom_line(aes(x = .ei, y = yhat, group = G1), alpha = 0.1)+
+  geom_abline(intercept = 0, slope = 1, linewidth = 1, linetype = "dashed", color = "black")+
+
+  geom_point(data = dataPoints,
+              aes(x = .ei,
+                  y = y,
+                  fill = group,
+                  group = G1),
+            alpha = 1, shape = 21, size=3)+
+  geom_line(data = dataPoints,
+              aes(x = .ei,
+                  y = yhat,
+                  color = group,
+                  group = G1),
+            alpha = 1, linewidth = 1)+
+  
+  scale_color_manual(values = c(azul, rojo))+
+  scale_fill_manual(values = c(azul, rojo))+
+  scale_x_continuous(limits = c(0,19))+
+  scale_y_continuous(limits = c(0,19))+
+  
+  guides(fill = guide_legend(title = "Slope"), 
+         color = guide_legend(title = "Slope"))+
+  
+  labs(x = expression("Environmental index (Mg"~ha^-1~")"), 
+       y = expression("Grain yield (Mg"~ha^-1~")")
+       )+
+  theme_nice()+
+  theme(axis.text.x = element_text(size = 10))
+
+p
+```
+
+# Model yield per se against slope of reaction norm
+
+For each region we derive 4 moments of the normal distribution to model
+
+```{r}
+library(multidplyr)
+cluster <- new_cluster(16)
+cluster_library(cluster, c("dplyr", "purrr", "bayesQR"))
+
+# Divide and conquer because I model mean and variance independently for each genotype x region combination
+# Quantile regression major wheat producing regions
+qrWR <-
+  dataWR %>% 
+  nest(.by = c("G1", "Region")) %>% 
+  #rowwise() %>% 
+  partition(cluster) %>% 
+  mutate(M = map(data,  
+                 possibly(
+                   function(data){
+                     iter <- 5000
+                     burnin <- 2000
+                     
+                     # Quantile 0.95
+                     mod_q95 <- bayesQR(GY ~ 1, 
+                                        quantile = 0.95, 
+                                        data = data,
+                                        ndraw = iter)
+                     # Save predicted quantile
+                     q95 <- mean(mod_q95[[1]]$betadraw[burnin:iter,], na.rm=T)
+                     
+                     # Quantile 0.05
+                     mod_q05 <- bayesQR(GY ~ 1, 
+                                        quantile = 0.05, 
+                                        data = data,
+                                        ndraw = iter)
+                     # Save predicted quantile
+                     q05 <- mean(mod_q05[[1]]$betadraw[burnin:iter,], na.rm=T)
+                     
+                     data.frame("q05" = q05, "q95" = q95)
+                     }, otherwise = NA)
+                 )
+         ) %>% 
+  dplyr::collect()
+
+saveRDS(qrWR, "../../output/model output/qr_wheat_regions_aus.RData")
+
+```
+
+```{r}
+qrWR <- readRDS("../../output/model output/qr_wheat_regions_aus.RData") %>% 
+  mutate(Region = case_when(Region == "Alberta" ~ "Canada (Alberta)",
+                            Region == "Manitoba" ~ "Canada (Manitoba)",
+                            T ~ Region
+                            )
+         )
+
+
+dataSlopes <- 
+  dataFW %>% 
+  left_join(qrWR %>% 
+              select(-data) %>% 
+              unnest(c(M)), 
+            by = join_by(Region, G1)) %>% 
+  select(Region, q05, q95, .slope) %>% 
+  unique() %>% 
+  mutate(q05 = case_when(q05 <= 0 ~ 0.00001, T~q05)     )
+
+
+#summary(dataSlopes)
+```
+
+```{r}
+library(multidplyr)
+cluster <- new_cluster(10)
+cluster_library(cluster, c("dplyr", "purrr", "brms", "rstan"))
+
+modSlopes <- 
+  dataSlopes %>% 
+  pivot_longer(cols = c(q05:q95)) %>% 
+  nest(.by = c("Region", "name")) %>% 
+  partition(cluster) %>% 
+  mutate(modSlopes = map(data, 
+                         ~brm(
+                           prior = c(prior_string("uniform(-10, 10)", class = "Intercept", lb = -10, ub = 10),
+                                     prior_string("normal(0, 0.1)", class = "b") 
+                                     ),
+                           bf(value ~ .slope),
+                           chains = 4,
+                           warmup = 5000,
+                           iter = 10000, 
+                           data = ., 
+                           control = list(adapt_delta = 0.95),
+                           family = Gamma(link = "log")
+                           )
+                         )
+         ) %>% 
+  collect()
+
+saveRDS(modSlopes, "../../output/model output/slopes_yield_quantiles_wheat reiongs_aus.RData")
+```
+
+```{r}
+modSlopes <- readRDS("../../output/model output/slopes_yield_quantiles_wheat reiongs_aus.RData")
+
+
+preds <- 
+modSlopes %>% 
+  mutate(., 
+         newdata = map(modSlopes, ~expand_grid(.slope = seq(min(.$data$.slope), 
+                                                            max(.$data$.slope), 
+                                                            length.out = 60
+                                                            )
+                                               )
+                       ),
+         preds = map2(modSlopes,newdata, 
+                      ~add_predicted_draws(.x,
+                                           newdata = .y, value = ".predicted") %>% 
+                        summarise(.groups = "keep",
+                                  q050 = mean(.predicted),
+                                  q975 = quantile(.predicted, probs = .975),
+                                  q025 = quantile(.predicted, probs = 0.025)
+                                  )
+                      )
+         ) %>% 
+  select(Region, name, preds) %>% 
+  unnest(preds) %>% 
+  mutate(Region = case_when(Region == "Alberta" ~ "Canada (Alberta)",
+                            Region == "Manitoba" ~ "Canada (Manitoba)",
+                            T ~ Region
+                            )
+         )
+
+```
+
+```{r fig.width= 12, fig.height=4}
+p2 <- 
+  preds %>% 
+  ggplot()+
+  geom_point(data = dataFW, aes(x = .slope, y = y), shape = 21, alpha = 0.01, fill = "grey30")+
+  # # High yielding environments
+  
+  
+  
+  geom_ribbon(data = preds, aes(x = .slope,
+                                 ymax = q975, ymin = q025, group = name), alpha = 0.2)+
+  geom_point(data = dataSlopes %>% pivot_longer(cols = c("q95", "q05")),
+             aes(x = .slope, y = value, shape = name), alpha = 1, size=3, fill = "white")+
+  
+  geom_point(data = dataSlopes %>% 
+               pivot_longer(cols = c("q95", "q05")) %>% 
+               nest(.by = "Region") %>% 
+               mutate(data = map(data, ~mutate(., 
+                                               .categ = case_when(.slope == min(.slope)~"min", 
+                                                                  .slope == max(.slope)~"max",
+                                                                  T~NA
+                                                                  )) %>%
+                                   drop_na())) %>% 
+               unnest(data) ,
+             aes(x = .slope, y = value, shape = name, fill = .categ), alpha = 0.8, size=3)+
+  
+  
+  geom_line(data = preds, aes(x = .slope,
+                              y = q050, group = name), linewidth = 1)+
+  facet_wrap(~Region, nrow=1)+
+  scale_shape_manual(values = c(21,24))+
+  scale_fill_manual(values = c(azul, rojo))+
+  scale_y_continuous(limits = c(0,19))+
+  guides(fill = "none", 
+         shape = "none")+
+  labs(x = expression("Yield phenotypic plasticity"), 
+       y = expression("Grain yield (Mg"~ha^-1~")")
+       )+
+  theme_nice()+
+  theme(plot.background = element_rect(fill = "white", color = "white"), 
+        axis.text.x = element_text(size = 10))
+
+p2
+
+```
+
+```{r fig.width=12, fig.height = 4.8}
+pslopes_wr <- ggpubr::ggarrange(p,p2,nrow = 2, labels = "AUTO", heights = c(0.54, 0.46), label.x = c(0.03, 0.03), label.y = c(0.77, 1))
+
+ggsave(plot = p2, "../../output/plots/paper/Yield phenotypes wheat regions_bottom.png", width = 12, height = 2.5, dpi = 600)
+```

@@ -1,0 +1,144 @@
+---
+title: "Phenotype"
+format: html
+editor: visual
+---
+
+This codes defines 4 phenotypes from the grain yield distribution
+
+1.  Expected value
+2.  Slope of the FW regression
+3.  Quantile 0.975
+4.  Quantile 0.025
+
+# Packages
+
+```{r include  = FALSE}
+suppressWarnings(source("../functions.R"))
+```
+
+# Load data
+
+```{r}
+path <- "../../data/phenotypes/dataVPT.csv"
+
+if (file.exists(path)){
+  
+  dataVPT <- read.csv(path)
+  
+  }else{
+    
+  dataVPT <- read_csv("../../data/phenotypes/vpt_all_final.csv", 
+                    show_col_types = F) %>%
+    unique() %>% 
+    # String operations to merge with genotype data
+    mutate(.,
+           G = str_replace_all(G, " ", "_"), 
+           G = str_replace_all(G, "/", "-"), 
+           G = str_replace_all(G, "'", ""), 
+           G = str_replace_all(G, "SNOWMASS_2.0", "SNOWMASS_2"), 
+           G = str_replace_all(G, "BAKER_S_ANN", "BAKERS_ANN"), 
+           G = str_replace_all(G, "SMITH_S_GOLD", "SMITHS_GOLD")
+           ) %>% 
+    # These cultivars don't have marker data
+    filter(G %nin% c("AGSECO_7853", "CSU_BLEND09", "JAG,2137", "JEI_110",
+                     "KALVESTA", "OK05312", "SY_LLANO","TAM_113","TONKAWA")) %>% 
+    drop_na(GY) %>% 
+    # get the reps
+    nest(.by = c("G", "E")) %>% 
+    mutate(data = map(data, ~rowid_to_column(., "R"))) %>% 
+    unnest(data) %>% 
+    mutate(R = as.factor(R))
+
+  write.csv(dataVPT, "../../data/phenotypes/dataVPT.csv")
+}
+```
+
+# Models
+
+```{r}
+iter <- 5000
+burnin <- 2000
+
+genotypes <- unique(dataVPT$G)
+M <- matrix(NA, length(genotypes), 3)
+colnames(M) <- c("G", "q975", "q050")
+```
+
+## Quantiles 0.95 & 0.05
+
+```{r include = FALSE}
+# Divide and conquer because I model mean and variance independently for each genotype
+for (i in 1:length(genotypes)){
+  set.seed(123)
+  g <- genotypes[i] 
+  # Quantile 0.975
+  mod_q95 <- bayesQR(GY ~ 1, quantile = 0.95, 
+                     data = dataVPT %>% filter(G == g),
+                     ndraw = iter)
+  # Save predicted quantile
+  M[i, "q975"] <- mean(mod_q95[[1]]$betadraw[burnin:iter,], na.rm=T)
+  # Quantile 0.05
+  mod_q05 <- bayesQR(GY ~ 1, quantile = 0.05, 
+                     data = dataVPT %>% filter(G == g),
+                     ndraw = iter)
+  # Save predicted quantile
+  M[i, "q050"] <- mean(mod_q05[[1]]$betadraw[burnin:iter,], na.rm=T)
+}
+
+M[,"G"] <- unique(dataVPT$G)
+
+```
+
+## Finlay-Wilkinson regression
+
+```{r}
+path_fw <- "../../output/model output/fw_slope.RData"
+
+if (file.exists(path_fw)){
+  
+  fw <- readRDS(path_fw)
+  
+  }else{
+    
+  fw <- FW(y= dataVPT$GY,
+           VAR= dataVPT$G, 
+           ENV=dataVPT$E,
+           method="Gibbs",
+           nchain = 3, 
+           seed = c(rep(123, 3)),
+           burnIn = burnin, 
+           nIter = iter)
+  
+  saveRDS(fw, "../../output/model output/fw_slope.RData")
+}
+
+# Genotype names
+g <- fw$VARlevels
+# Genotype means
+gmean <- rowMeans(fw$g)
+# FW slopes
+slope <- rowMeans(fw$b) + 1
+
+
+M2 <- data.frame(G = g, mean = gmean, slope = slope)
+```
+
+# Merge phenotypes
+
+```{r}
+phenotypes <- 
+  as.data.frame(M) %>% 
+  full_join(M2, by = join_by(G)) %>% 
+  mutate_at(vars(q975:slope), ~as.numeric(.)) %>% 
+  drop_na()
+
+saveRDS(phenotypes, "../../output/model output/phenotypes_distribution_moments.RData")
+```
+
+```{r}
+load("samps.rda")
+
+quantile(samps[[1]][,1], probs = .975)
+quantile(samps[[1]][,1], probs = .025)
+```

@@ -1,0 +1,277 @@
+
+```{r include = FALSE}
+suppressWarnings(source("../functions.R"))
+```
+
+
+# Phenotype
+
+```{r}
+Y <- readRDS("../../output/model output/phenotypes_distribution_moments.RData")
+```
+
+# Genotype
+
+```{r}
+G <- data.table::fread("../../data/genotypes/genotype_data_KNNimputed_fromMLC80_maf05_maxhet_5.hmp.txt", 
+                       header = FALSE)
+
+names <- 
+  G[1,12:251] %>% 
+  pivot_longer(cols = everything(), 
+               names_to = "var_no",
+               values_to = "G") %>%
+  filter(G %in% Y$G)
+
+
+G1 <- 
+  G %>% 
+  dplyr::select(paste0("V", 1:11),names$var_no) %>% 
+  mutate(.,
+         V1 = case_when(V1 == "rs#"~"rs",T~V1),
+         V6 = case_when(V6 == "assembly#"~"assembly",T~V6)
+         ) %>%
+  as.data.frame()
+
+
+significant_snp <- G1
+  #filter(V1 %in% c("rs", sigSNP$snp)) 
+colnames(significant_snp) <- significant_snp[1,]
+significant_snp <- significant_snp[-1,]
+
+write.csv(significant_snp, "hapmap_all_snps.csv", row.names = F)
+```
+
+# Numeric genotype
+
+```{r}
+#Load numeric genotype
+Gn <- data.table::fread("../../data/genotypes/numericGeno_MLC80.txt", 
+                       header = T) %>% 
+  as.data.frame() %>% 
+  filter(`<Marker>` %in% names$G)
+# Get the covariate
+t2NS <- Gn %>% 
+  select(`<Marker>`,S2A_525068) %>% 
+  rename_all(~c("G", "CV")) 
+```
+
+# PCA
+
+```{r}
+pca <- prcomp(Gn[,-1], )
+#summary(pca)
+
+dataPCA <- cbind(t2NS, pca$x[,1:10]) %>% 
+  filter(CV != 0.5) %>% 
+  mutate(CV = case_when(CV == 0 ~ "Insertion", T~"Deletion"))
+
+jagger <- dataPCA %>% 
+  filter(G == "JAGGER") %>% 
+  mutate(G = "Jagger")
+
+p <- 
+ggplot()+
+  geom_vline(aes(xintercept = 0), alpha = 0.5, linewidth = 1, linetype = "dashed")+
+  geom_hline(aes(yintercept = 0), alpha = 0.5, linewidth = 1, linetype = "dashed")+
+  geom_point(data = dataPCA, aes(x = PC1, y = PC2, shape = CV, fill = CV), size = 3, shape = 21, color = "black", stroke = 1) +
+  ggrepel::geom_text_repel(data = jagger, aes(label = G, x = PC1, y = PC2))+
+  scale_fill_manual(values = c("white", "black"), labels = c("Absence","Presence"))+
+  guides(shape = guide_legend(title = "2NvS translocation", title.position = "top",  title.hjust=0.5), 
+         fill = guide_legend(title = "2NvS translocation", title.position = "top",  title.hjust=0.5))+
+  
+  labs(x = "Dim 1 (6.1%)", y = "Dim 2 (4.9%)")+
+  theme_nice()+
+  theme(legend.text = element_text(size = 12), 
+        legend.title = element_text(size = 12))
+p
+```
+
+```{r}
+phenotypes <- readRDS("../../output/model output/phenotypes_distribution_moments.RData")
+
+data2NS <- 
+  left_join(dataPCA[,1:2], phenotypes) %>% 
+  mutate(mean = mean+3.36) %>% 
+  pivot_longer(cols = c(q975:slope)) %>% 
+  nest(.by = "name") 
+
+mod2NS <- data2NS %>% 
+  mutate(.,
+         mod = map(data, 
+                   function(data){
+                     mod <- brm(value ~ 0 + CV, data = data)
+                     return(mod)
+                     }
+                   ),
+         preds = map(mod, 
+                    function(mod){
+                      newdata <- data.frame(CV = c("Insertion", "Deletion"))
+                      # get predictions
+                      preds <- add_linpred_draws(mod, 
+                                                 newdata = newdata, 
+                                                 value = ".predicted") %>% 
+                        ungroup() %>% 
+                        select(-.row) %>% 
+                        pivot_wider(names_from = CV, values_from = .predicted) %>% 
+                        mutate(.predicted = Insertion - Deletion)
+                      }),
+         pprob = map_dbl(preds, 
+                         function(preds){
+                           pprobability <- preds %>% mutate(pp = case_when(.predicted < 0 ~ 1, T~0))
+                           pprobability <- round(sum(pprobability$pp)/nrow(pprobability),2)
+                       return(pprobability)
+                       }),
+         preds_sum = map(preds, 
+                         function(preds){
+                           preds_sum <- 
+                             preds %>% 
+                             summarise(.groups = "keep",
+                                      q050 = mean(.predicted), 
+                                      q975 = quantile(.predicted, probs = .975), 
+                                      q025 = quantile(.predicted, probs = 0.025)
+                                      )
+                           return(preds_sum)
+                           }))
+
+saveRDS(mod2NS, "../../output/model output/2NS segment model.RData")
+
+mod2NS <- readRDS("../../output/model output/2NS segment model.RData")
+
+plots2NS <- mod2NS %>% 
+  mutate(.,
+         p1 = pmap(list(preds, preds_sum, pprob), 
+                   function(preds, preds_sum, pprob){
+                     p1 <- 
+                       ggplot()+  
+                       stat_halfeye(data = preds, aes(x = "", y = .predicted), fill = "grey60")+
+                       geom_linerange(data = preds_sum, aes(ymin = q975, ymax = q025, x = ""), linewidth = 1)+
+                       geom_point(data = preds_sum, aes(x = "", y = q050, fill = CV), fill = "white", alpha = 1, shape = 22, size=4)+
+                       geom_hline(aes(yintercept = 0), linetype = "dashed", linewidth = 1)+
+                       
+                       guides(fill = "none")+
+                       theme_nice()+
+                       theme(strip.placement = "outside", 
+                             strip.text = element_text(size = 10,face = "plain"), 
+                             strip.background = element_blank(), 
+                             axis.text.x = element_text(angle = 90, vjust = 1)
+                             )
+                     return(p1)
+                     }
+                   ), 
+         p2 = pmap(list(mod, name), 
+                   function(mod, name2){
+                     
+                     
+                     data <- unnest(data2NS, data) %>%
+                       filter(name == name2)
+                     
+                     newdata <- data.frame(CV = c("Insertion", "Deletion"))
+                     # get predictions
+                     preds <- add_predicted_draws(mod, 
+                                                   newdata = newdata, 
+                                                   value = ".predicted") %>% 
+                       summarise(.groups = "keep",
+                                 q050 = mean(.predicted), 
+                                 q975 = quantile(.predicted, probs = .975), 
+                                 q025 = quantile(.predicted, probs = 0.025)
+                                 )
+                     
+                     p2 <-
+                       ggplot()+
+                       geom_point(data = data, aes(x = CV, y = value, shape = CV),
+                                  fill = "white", alpha = 0.2,stroke = 0.8, position = position_jitter(width = 0.1))+
+                       geom_linerange(data = preds, aes(ymin = q975, ymax = q025, x = CV), linewidth = 1)+
+                       geom_point(data = preds, aes(x = CV, y = q050, fill = CV, shape = CV), size = 4)+
+                       scale_fill_manual(values = c("white", "black"))+
+                       scale_color_manual(values = c("white", "black"))+
+                       scale_shape_manual(values = c(21, 21))+
+
+                       guides(fill = "none", color = "none", shape = "none")+
+                       theme_nice()+
+                       theme(strip.placement = "outside",
+                             strip.text = element_text(size = 10,face = "plain"),
+                             strip.background = element_blank(),
+                             axis.text.x = element_text(angle = 90, vjust = 1))
+                     return(p2)
+                     }
+                   )
+         )
+
+
+```
+
+
+```{r fig.width=6, fig.height=3}
+p1.1 <- plots2NS$p1[[1]]+ 
+  labs(x = "", y = expression(Delta~"95th yield percentile (Mg"~ha^-1~")"))+
+  scale_y_continuous(limits = c(0, 1.5), breaks = seq(0, 1.5, 0.2))
+p1.2 <- plots2NS$p1[[2]]+ 
+  labs(x = "", y = expression(Delta~"5th yield percentile (Mg"~ha^-1~")"))+
+  scale_y_continuous(limits = c(0, 1.5), breaks = seq(0, 1.5, 0.2))
+p1.3 <- plots2NS$p1[[3]]+
+  labs(x = "", y = expression(Delta~"Mean yield (Mg"~ha^-1~")"))+
+  scale_y_continuous(limits = c(0, 1.5), breaks = seq(0, 1.5, 0.2))
+
+p1.4 <- plots2NS$p1[[4]]+
+  labs(x = "", y = expression(Delta~"Yield plasticity (unitless)"))+
+  scale_y_continuous(limits = c(0, 0.1), breaks = seq(0, 0.1, 0.02))
+
+p1s <- ggpubr::ggarrange(p1.4, p1.1, p1.3, p1.2, ncol = 4, labels = c("G", "H", "I", "J"))
+
+
+```
+
+```{r fig.width=6, fig.height=4}
+p2.1 <- plots2NS$p2[[1]]+
+  labs(x = "", y = expression("95th yield percentile (Mg"~ha^-1~")"))+
+  scale_y_continuous(limits = c(0, 8.5), breaks = seq(0, 8.5, 1))+
+  scale_x_discrete(labels = c("Absence","Presence"))
+p2.2 <- plots2NS$p2[[2]]+ 
+  labs(x = "", y = expression("5th yield percentile (Mg"~ha^-1~")"))+
+  scale_y_continuous(limits = c(0, 8.5), breaks = seq(0, 8.5, 1))+
+  scale_x_discrete(labels = c("Absence","Presence"))
+p2.3 <- plots2NS$p2[[3]]+
+  labs(x = "", y = expression("Mean yield (Mg"~ha^-1~")"))+
+  scale_y_continuous(limits = c(0, 8.5), breaks = seq(0, 8.5, 1))+
+  scale_x_discrete(labels = c("Absence","Presence"))
+p2.4 <- plots2NS$p2[[4]]+
+  labs(x = "", y = "Yield plasticity (unitless)")+
+  scale_x_discrete(labels = c("Absence","Presence"))
+
+p2s <- ggpubr::ggarrange(p2.4, p2.1, p2.3, p2.2, ncol = 4,labels = c("C", "D", "E","F"))
+
+p2s
+```
+
+
+```{r fig.width= 10, fig.height=12}
+f2ns <- readRDS("../../output/plots/f2NS_plot.RData")
+
+ppca <- ggpubr::ggarrange(NULL,p,f2ns,NULL, labels = c("","A","B",""), nrow = 1, widths = c(0.15, 0.35, 0.35, 0.15), common.legend = T, label.y = 1.05)+
+  theme(plot.background = element_rect(fill = "white", color = "white"))
+
+pout <- ggpubr::ggarrange(ppca, p2s, p1s, nrow = 3)
+pout
+
+ggsave(plot = pout, "../../output/plots/paper/2NS.png", width = 10, height = 12)
+```
+
+
+
+Decide how many PC's to include as covariates in the model
+
+```{r}
+xx <- read.csv("../../output/GWAS_FarmCPU/GAPIT.Genotype.PCA_eigenvalues.csv") %>% slice(1:20) %>%
+  mutate(y = x, x = 1:20)
+mp <- ggplot(xx,  aes(x = x, y = y)) + 
+  geom_line(size = 1) + 
+  geom_point(size = 3, pch = 21, fill = "darkgreen", alpha = 0.7) +
+  geom_point(data = xx %>% slice(14), size = 3, pch = 21, fill = "darkred") +
+  scale_x_continuous(breaks = 1:120) +
+  theme_nice() +
+  labs(x = "PC", y = "Eigen Values")
+mp
+
+```
+

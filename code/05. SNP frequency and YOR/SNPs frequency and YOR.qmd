@@ -1,0 +1,370 @@
+
+```{r include = FALSE}
+clrs <- MetBrewer::met.brewer("Java")
+suppressWarnings(source("../functions.R"))
+```
+
+```{r}
+Y <- readRDS("../../output/model output/phenotypes_distribution_moments.RData")
+# Read unique and significant SNP
+SNPs_freq <- readRDS("../../output/unique_SNPs_frequancy.RData")
+
+# Read genotypic data
+
+G <- data.table::fread("../../data/genotypes/genotype_data_KNNimputed_fromMLC80_maf05_maxhet_5.hmp.txt", 
+                       header = FALSE)
+
+names <- 
+  G[1,12:251] %>% 
+  pivot_longer(cols = everything(), 
+               names_to = "var_no",
+               values_to = "G") %>%
+  filter(G %in% Y$G)
+Gn <- data.table::fread("../../data/genotypes/genotype_data_KNNimputed_fromMLC80_maf05_maxhet_5_numeric.hmp.txt", 
+                       header = T) %>% 
+  as.data.frame() %>% 
+  select(`<Marker>`, SNPs_freq$SNP) %>% 
+  rename_at(vars(`<Marker>`),  ~"G" ) %>% 
+  pivot_longer(-G, names_to = "SNP")
+
+# Read .yor data
+data2 <- read.csv("../../data/phenotypes/var_traits_final_YOR.csv")[, c("G", "YOR")] %>% 
+  rename_all(~c("G", ".yor")) %>% 
+  mutate(.,
+         G = str_replace_all(G, " ", "_"), 
+         G = str_replace_all(G, "/", "-"), 
+         G = str_replace_all(G, "'", ""), 
+         G = str_replace_all(G, "SNOWMASS_2.0", "SNOWMASS_2"), 
+         G = str_replace_all(G, "BAKER_S_ANN", "BAKERS_ANN"), 
+         G = str_replace_all(G, "SMITH_S_GOLD", "SMITHS_GOLD")
+         ) %>% 
+  # These cultivars don't have marker data
+  filter(G %nin% c("AGSECO_7853", "CSU_BLEND09", "JAG,2137", "JEI_110",
+                   "KALVESTA", "OK05312", "SY_LLANO","TAM_113","TONKAWA")) %>% 
+  drop_na() %>% 
+  mutate(.yor = .yor - min(.yor)) %>% 
+  left_join(readRDS("../../output/model output/phenotypes_distribution_moments.RData")) %>% 
+  mutate(mean = mean+3.36) %>% 
+  # change format of data for merging
+  pivot_longer(cols = c(q975:slope), names_to = "trait", values_to = "trait_val")
+
+# Join G1 and the trait data so that each snp is matching a trait
+
+  
+
+
+```
+# Test significant SNP
+
+```{r fig.width=10, fig.height=10}
+SNPs <- left_join(data2, left_join(Gn, SNPs_freq) , by = join_by(G, trait))
+
+SNPs <- 
+SNPs %>% 
+  filter(value != 0.5) %>% 
+  nest(.by = c("trait", "SNP")) 
+
+library(multidplyr)
+cluster <- new_cluster(16)
+cluster_library(cluster, c("dplyr", "purrr", "brms", "tidybayes", "tidyr"))
+
+test <- SNPs %>% 
+  partition(cluster) %>% 
+  mutate(mod = map(data, ~brm(trait_val ~ 1 + value, data = .x, cores = 1, family = gaussian(link = "identity"))
+                   ), 
+         pvalue = map_chr(mod,
+                          function(mod){
+                            preds <- 
+                              add_linpred_draws(mod, newdata = data.frame(value = c(1,0))) %>%
+                                ungroup() %>% 
+                                select(-.row) %>% 
+                                pivot_wider(values_from = .linpred, names_from = value) %>% 
+                                mutate(.effect = `1` - `0`)
+                              
+                              
+                              q975 <- quantile(preds$.effect, probs = 0.975)
+                              
+                              q005 <- quantile(preds$.effect, probs = 0.05)
+                              
+                              return(ifelse(between(0, q005, q975) == FALSE, "sig", "ns"))
+                          } ), 
+         effect = map(mod,
+                      function(mod){
+                        preds <- 
+                          add_linpred_draws(mod, newdata = data.frame(value = c(1,0))) %>%
+                            ungroup() %>% 
+                            select(-.row) %>% 
+                            pivot_wider(values_from = .linpred, names_from = value) %>% 
+                            mutate(.effect = `1` - `0`)
+                        
+                       preds %>% 
+                         pull(.effect)
+                          } )
+         ) %>% 
+  select(-mod) %>%
+  collect()
+
+
+test2 <- 
+test %>% 
+  filter(pvalue == "sig") %>% 
+  mutate(effect = map_dbl(effect, ~mean(.))) %>% 
+  unnest(data)
+
+saveRDS(test, "../../output/frequencies_favourable_alleles_bayes_all_samples.RData")
+saveRDS(test2, "../../output/SNPs_frequencies_test2_bayes.RData")
+
+test <- readRDS("../../output/frequencies_favourable_alleles_bayes_all_samples.RData")
+test2 <- readRDS("../../output/SNPs_frequencies_test2_bayes.RData")
+```
+
+# Sliding window over YOR
+
+```{r}
+years <- seq(1989-1967	, max(data2$.yor))
+
+Wd <- data.frame(Wd = rep(NA, 50)) %>% 
+  mutate(Wd = as.list(Wd))
+
+window_size = 10
+
+# Initialize the index
+i <- 1
+# Loop through the vector
+while (i <= (length(years) - window_size + 1)) {
+  # Get the current window
+  window <- years[i:(i + window_size - 1)]
+
+   Wd$Wd[[i]]<- list(window)
+  # Increment the index
+  i <- i + 1
+}
+
+```
+
+```{r fig.width=10, fig.height=10}
+dat <- 
+unique(test2[, c(".yor", "G", "SNP","trait", "value", "trait_val", "effect")]) %>%
+  nest(.by = c("SNP", "trait", "effect"))
+
+dat3 <- 
+  # Merge iterative window
+  expand_grid(dat, Wd) %>% 
+  #filter(SNP == "S2B_13713678" & trait == "mean")
+  mutate(data = pmap(list(data,Wd,effect), function(data, Wd, effect){
+    # obtain frequencies for each window x SNP x trait combination
+    data %>%
+      filter(.yor %in% Wd[[1]]) %>% 
+      mutate(value = case_when(effect <=0 & value == 1 ~ "min",
+                               effect > 0 & value == 0 ~ "min",
+                               T~"max")
+             ) %>%
+      count(value) %>%
+      pivot_wider(names_from = value, values_from = n)
+      }), 
+    # get window size of middle point
+    .yor = map_dbl(Wd, ~.[[1]][5])
+    ) %>% 
+  select(-Wd) %>% 
+  unnest(cols = c(data))
+  
+# effect = 0.2
+# dat3$data[[1]] %>%
+#       filter(.yor %in% Wd$Wd[[1]][[1]]) %>% 
+#       mutate(value = case_when(effect <=0 & value == 1 ~ "min", T~"max")
+#              ) %>%
+#       count(value) %>%
+#       pivot_wider(names_from = value, values_from = n)
+```
+
+
+
+
+```{r fig.width=10, fig.height=10}
+dat2 <- 
+  dat3 %>% 
+  drop_na() %>% 
+  mutate(f = max/(min+max)) 
+  
+#saveRDS(dat2, "../../output/frequencies_favourable_alleles_bayes.RData")
+```
+
+
+# Plot frequency changes in 2NvS
+
+```{r}
+dat2 <- readRDS("../../output/frequencies_favourable_alleles_bayes.RData") %>% 
+  # filter 2NS and use in separate panel
+  filter(SNP == "S2A_25070268" & trait == "mean") %>% 
+  mutate(.yor = .yor+1967)
+
+
+f2ns <- 
+  ggplot()+
+  geom_line(data = dat2, aes(x = as.double(.yor), y = f, 
+                             group = SNP), color = "black",
+            linewidth = 1)+
+  annotate(
+    geom = "curve", x = 1994, y = 0.2,
+    xend = 1994,
+    yend = 0.07,
+    curvature = .3, arrow = arrow(length = unit(2, "mm"))
+  ) +
+  annotate(geom = "text", x = 1993, y = 0.25, label = "Jagger", hjust = "left")+
+  
+  labs(y = "Frequency of 2NvS translocation", x = "Year of release")+
+  guides(color = "none", linewidth = "none", alpha = "none")+
+  scale_y_continuous(breaks = seq(0, 1, 0.25), 
+                     limits = c(0, 1))+
+  scale_x_continuous(breaks = seq(1960, 2030, 10), 
+                     limits = c(1990, 2022))+
+  theme_nice()+
+  theme(plot.background = element_rect(fill = "white", color = "white"), 
+        axis.text = element_text(size = 12))
+
+saveRDS(f2ns, "../../output/plots/f2NS_plot.RData")
+```
+
+
+
+```{r fig.width= 10, fig.height=3}
+trait_names <- as_labeller(c(mean = "C) Mean yield", slope = "A) Yield plasticity", q975 = "B) 95th yield percentile", q050 = "D) 5th yield percentile"))
+
+dat2 <- readRDS("../../output/frequencies_favourable_alleles_bayes.RData") %>% 
+  # filter 2NS and use in separate panel
+  filter(SNP %nin% c("S2A_25070268", "S2A_17606976")) %>% 
+  group_by(trait) %>% 
+  # effect is effect per se and effect 2 is effect of allele relative to maximum
+  mutate(effect2 = abs(effect)/max(abs(effect)))
+```
+
+# Get significance of slope of YOR and f
+
+```{r}
+library(betareg)
+
+fSlope <- 
+dat2 %>% 
+  ungroup() %>% 
+  nest(.by = c("trait", "SNP")) %>% 
+  mutate(mod = map(data, 
+                   function(data){
+                     mod <-betareg(f ~.yor,
+                                   data = data, 
+                                   link = "logit")
+                     mod
+                   }
+                   ), 
+         pval = map_chr(mod, 
+                   function(mod){
+                     tidy <- broom::tidy(mod)
+                     pval <- tidy$p.value[2]
+                     ifelse(pval<= 0.05, "sig", "NS")
+                   }
+                   ), 
+         slope = map_dbl(mod, 
+                   function(mod){
+                     tidy <- broom::tidy(mod)
+
+                     round(tidy$estimate[2],2)
+                   }
+                   ), 
+         preds = map(mod, 
+                   function(mod){
+                     preds <- predict(mod, type = "response")
+
+                     preds
+                   }
+                   )
+         ) %>% 
+  select(-mod) %>% 
+  unnest() %>% 
+  mutate(slope = case_when(slope > 0 ~ "Positive",
+                           slope <= 0 ~ "Negative", 
+                           T~NA_character_), 
+         slope = case_when(pval == "NS"~"Neutral", T~slope))
+
+```
+
+
+
+```{r fig.width= 10, fig.height=3}
+colors <- RColorBrewer::brewer.pal(n = 11, name = "RdBu")  # Use 11 for a smoother gradient
+
+pf <- 
+  ggplot()+
+  geom_line(data = dat2, aes(x = as.double(.yor)+1967, y = f, alpha = abs(effect2),#color = SNP,
+                             group = SNP), linetype = "solid", #color = "black",
+            linewidth = 1)+
+  # geom_line(data = fSlope, aes(x = as.double(.yor)+1967, y = preds, color = trait, alpha = abs(effect2),
+  #                            group = SNP), 
+  #           linewidth = 1)+
+  ggrepel::geom_text_repel(data = dat2 %>%
+                     separate(SNP, c("chr", "pos"), "_") %>% 
+                     mutate(chr = str_remove(chr, "S")) %>% 
+                     filter(.yor == max(.yor)), 
+            aes(label = chr, x = .yor+1967, y = f,alpha = abs(effect2)), 
+             box.padding = 0,min.segment.length = 0.5, nudge_x = 2,
+            max.overlaps = Inf)+
+  facet_wrap(~factor(trait, c("slope", "q975", "mean", "q050")),
+             nrow = 1,
+             labeller = trait_names
+             )+
+  labs(y = "Frequency of favourable alleles", x = "Year of release")+
+  #scale_color_manual(values = rep(c("#B2182B", "#2166AC"),10))+
+  scale_alpha_continuous(range = c(0.1, 1))+
+  #scale_linetype_manual(values = c("solid","dotted", "solid"))+
+  guides(linewidth = "none", alpha = "none", color = "none"
+         #linetype = guide_legend(title = "Time trends of favourable alleles", overwrite.aes = list(linewidth = 0.5)), 
+         #color = guide_legend(title = "Time trends of favourable alleles", overwrite.aes = list(linewidth = 0.5)) 
+         )+
+  scale_x_continuous(breaks = seq(1960, 2030, 10), 
+                     limits = c(1990, 2022))+
+  theme_nice()+
+  theme(plot.background = element_rect(fill = "white", color = "white"), 
+        axis.text = element_text(size = 12))
+
+pf
+
+```
+
+
+```{r}
+test3 <- 
+test %>% 
+  filter(pvalue == "sig" & SNP %nin% c("S2A_25070268", "S2A_17606976")) %>% 
+  mutate(effect2 = map_dbl(effect, ~mean(.)), 
+         effect3 = map2(effect,effect2, ~case_when(.y <=0 ~ .x + 2*abs(.y), T~.x) )) %>% 
+  select(trait, SNP, effect3, effect) %>% 
+  unnest()
+```
+
+
+```{r fig.width= 10, fig.height=3}
+#trait_names <- as_labeller(c(mean = "E) Yield mean", slope = "H) Yield plasticity", q975 = "G) Yield quantile 0.95", q050 = "F) Yield quantile 0.05"))
+trait_names <- as_labeller(c(mean = "G) Mean yield", slope = "E) Yield plasticity", q975 = "F) 95th yield percentile", q050 = "H) 5th yield percentile"))
+
+pf2 <- 
+test3 %>% 
+  ggplot()+
+  geom_histogram(aes(x = effect3), color = "black", fill = "grey40", alpha = 0.4)+
+  facet_wrap(~factor(trait, c("slope", "q975", "mean", "q050")),
+             nrow = 1,
+             labeller = trait_names, 
+             scales = "free_x"
+             )+
+  labs(y = "count", x = "Effect of favourable allele on yield phenotype")+
+  scale_fill_manual(values = clrs[c(1,5,3,2)])+
+  guides(fill = "none")+
+  theme_nice()+
+  theme(plot.background = element_rect(fill = "white", color = "white"), 
+        axis.text = element_text(size = 12))
+```
+
+
+
+```{r fig.width=10, fig.height = 6, warning = FALSE}
+p <- ggpubr::ggarrange(pf,pf2, nrow = 2, heights = c(0.59, 0.41))
+
+ggsave(plot = p, "../../output/plots/paper/frequancies_effect_bayes.png", width = 10, height = 5, dpi = 600)
+```

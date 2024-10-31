@@ -1,0 +1,131 @@
+
+
+```{r setup warning = F, message = F}
+library(tidyverse)
+library(extrafont)
+
+loadfonts(device = c("all", "pdf", "postscript", "win"))
+`%nin%` <- Negate(`%in%`)
+# Custom ggplot theme to make pretty plots
+# Get the font at https://fonts.google.com/specimen/Jost
+suppressWarnings(source("../functions.R"))
+
+```
+
+# Load data
+
+```{r message=FALSE, warning = FALSE}
+files <- list.files("../../output/GWAS_FarmCPU_Cov/PC_10/", 
+                    pattern = "GAPIT.Association.GWAS_Results.*", 
+                    full.names = T)
+
+man <- 
+  read_csv(files, id = "trait") %>% 
+  janitor::clean_names() %>% 
+  dplyr::select(trait, snp, chr, pos,h_b_p_value, p_value) %>% 
+  mutate(.,
+         trait = str_replace_all(trait, c("../../output/GWAS_FarmCPU_Cov/PC_10/GAPIT.Association.GWAS_Results.FarmCPU." = "", ".csv" = "")),
+         logp = -log10(p_value)
+         )
+```
+
+# Wrangle data for Manhattan plot
+
+```{r}
+don <-
+  # Use any trait, genotype is the same
+  man %>% 
+  # Filter UK Chromosome
+  filter(chr != "UN") %>% 
+  summarize(.by = c("chr"), 
+            chr_len = max(pos)) %>% 
+  # Calculate cumulative position of each chromosome
+  mutate(tot=cumsum(chr_len)-chr_len) %>%
+  dplyr::select(-chr_len) %>% 
+  # Add results dataset
+  left_join(man, by = join_by("chr")) %>% 
+  # Add a cumulative position of each SNP
+  arrange(chr, pos) %>%
+  mutate(BPcum=pos+tot)
+
+axisdf <- don %>%
+  summarize(.by = "chr", 
+            center = (max(BPcum) + min(BPcum) ) / 2 )
+```
+
+# Get "significant SNPs
+
+```{r}
+# Obtain significant SNPs
+sigSNP <- 
+ man %>% 
+  # Filter significant SNPs
+  filter(logp >3)
+  #filter(h_b_p_value < 0.05) 
+
+threshold <- min(sigSNP$logp)
+
+join_don <-
+  don[,c("chr", "snp", "trait", "BPcum", "logp")] %>%
+  summarise(.by = c(chr, snp, trait, BPcum),
+            logp_= max(logp))
+
+sigSNP <- left_join(sigSNP,join_don , by = join_by("snp", "chr", "trait"))
+```
+
+
+```{r fig.width=10, fig.height=8}
+trait_names <- as_labeller(c(mean = "C) Mean yield", slope = "A) Yield plasticity", q975 = "B) 95th yield percentile", q050 = "D) 5th yield percentile"))
+
+mhkPlot <- 
+ggplot(don, 
+       aes(x = BPcum, 
+           y = logp,
+           fill = chr
+           )
+       )+
+  geom_vline(data = sigSNP,
+             aes(xintercept = BPcum), linewidth = 4, alpha = 0.4, color = "grey70")+
+  geom_point(size=2, alpha = 0.7, shape = 21)+
+  geom_hline(aes(yintercept = threshold),
+             linetype = "dashed",
+             linewidth = 0.8)+
+  facet_wrap(~factor(trait, c("slope", "q975", "mean", "q050")),
+             nrow = 4,
+             labeller = trait_names
+             )+
+  scale_x_continuous(
+    label = axisdf$chr,
+    breaks = axisdf$center
+  )+
+  scale_y_continuous(expand = c(0,0), 
+                     limits = c(0,10))+
+  scale_size_continuous(range = c(0.5, 3)) +
+  scale_fill_manual(values = rep(
+    c("red3", "blue4"),
+    unique(length(axisdf$chr))
+  )) +
+  labs(
+    x = NULL,
+    y = expression(paste("-",log[10],"(P-value)") ))+
+  guides(fill = "none")+
+  theme_nice() +
+  theme(
+    legend.position = "top",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.ticks.x = element_line(),
+    axis.text.x = element_text(angle = 60, size =15, vjust = 0.5), 
+    axis.text.y = element_text(size = 15)
+  )
+
+ggsave(plot = mhkPlot, filename = "../../output/plots/paper/Manhattan_phenotypes.png", width = 10, height = 8)
+```
+
+
+
+
+
+
+
+

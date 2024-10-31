@@ -1,29 +1,43 @@
 
-# Colors 
-violeta <- '#75338a'
-naranja <- '#de870d'
-mix <- "#aa5d4c"
 
+library(tidyverse)
+library(brms)
+library(rstan)
+library(mgcv)
+library(tidybayes)
+library(nlme)
+library(lme4)
+library(emmeans)
+library(bayesQR)
+library(FW)
+library(extrafont)
+library(nlraa)
+rstan_options(auto_write = TRUE, silent = TRUE)
+options(mc.cores = parallel::detectCores())
+# Colors from MetBrewer
+clrs <- MetBrewer::met.brewer("Java")
+
+loadfonts(device = c("all", "pdf", "postscript", "win"))
+`%nin%` <- Negate(`%in%`)
 # Custom ggplot theme to make pretty plots
-theme_clean <- function() {
-  theme_minimal() +
+# Get the font at https://fonts.google.com/specimen/Jost
+theme_nice <- function() {
+  theme_minimal(base_family = "Jost") +
     theme(panel.grid.minor = element_blank(),
-          plot.title = element_text(face = "bold"),
-          axis.title = element_text(face = "bold"),
-          strip.text = element_text(face = "bold", size = rel(1), hjust = 0),
-          strip.background = element_rect(fill = "grey80", color = NA),
-          legend.title = element_text(face = "bold"))
+          plot.title = element_text(family = "Jost", face = "bold"),
+          axis.title = element_text(family = "Jost", size = 14),
+          strip.text = element_text(family = "Jost", face = "bold",
+                                    size = rel(1.2), hjust = 0),
+          legend.position = "top",
+          axis.line = element_line(),
+          plot.background = element_rect(fill = "white", color = "white"),
+          axis.text = element_text(size = 14),
+          strip.background = element_rect(fill = "grey80", color = NA)
+    )
 }
 
-## Mean square prediction error
-MSPE <- function(model, testingData){
-  
-  yTest <- testingData[,2]
-  yHat <- colMeans(rstan::extract(model, pars = "muTest")$muTest)
-  
-  MSPE <- sum((yTest - yHat)^2)/length(yHat)
-  return(MSPE)
-}
+azul = "#2c7c94"
+rojo = "#a65852"
 
 # Simulate Zaddocks growth stage
 
@@ -85,7 +99,7 @@ weather_summaries = function(data, tminCP = 4.5, tminGF = 0,
 {
   
   
-  VARS_SUM = c("PP", "Tmean", "Duration", "PQ", "VPD")
+  VARS_SUM = c("PP", "Tmean", "Duration", "PQ", "VPD", "ETE_CP", "ETE_GF")
   
   out = 
     data %>% 
@@ -122,13 +136,23 @@ weather_summaries = function(data, tminCP = 4.5, tminGF = 0,
                                                                  condition == 1 & accum_gdu >= minGDU_GF & accum_gdu <= maxGCU_GF ~ "GF", T~ NA_character_) ) %>% 
                                        drop_na(PERIOD) %>% 
                                        group_by(ANTHESIS, PERIOD) %>%
-                                       mutate(ndays = n())
-                                     %>% 
-                                       summarise_at(vars(TEMP2MMIN, TEMP2MMAX, VPDEFAVG, Tmean, PRECIP, ndays, SR, gdu_ant, gdu_gf),
+                                       mutate(.,
+                                              ndays = n(), 
+                                              # Extreme low temperature events can damage wheat stand
+                                              #ETE_TIL = case_when(TEMP2MMIN <= ETE_TIL ~ 1, T ~ 0), 
+                                              ETE_CP = case_when(TEMP2MMIN <= -2 ~ 1, T ~ 0), 
+                                              # Heat Stress events in Grain Filling
+                                              ETE_GF = case_when(TEMP2MMAX >= 30 ~ 1, T ~ 0), 
+                                              ) %>% 
+                                       summarise_at(vars(TEMP2MMIN, TEMP2MMAX, VPDEFAVG, Tmean, PRECIP, ndays, SR, gdu_ant, gdu_gf, ETE_CP, ETE_GF),
                                                     list(mean = ~mean(., na.rm=T), 
                                                          sum = ~sum(.) ))  %>% 
                                        mutate(PQ = SR_sum/ case_when(PERIOD == "CP"~ gdu_ant_sum,
                                                                      PERIOD == "GF"~ gdu_gf_sum), 
+                                              #ETE_TIL = ETE_TIL_sum, 
+                                              ETE_CP = ETE_CP_sum,
+                                              ETE_GF = ETE_GF_sum,
+                                              
                                               VPD = VPDEFAVG_mean,
                                               Duration = ndays_mean, 
                                               Tmean = Tmean_mean,
@@ -139,48 +163,3 @@ weather_summaries = function(data, tminCP = 4.5, tminGF = 0,
     ungroup()
   return(out)
 }
-
-
-
-#Calculate Plasticity
-plasticity3 <- function(data, genotype, variable){
-  
-  data1 = 
-    data %>%
-    group_by({{genotype}}) %>% 
-    mutate_at(variable, list(VAR_G =  ~var(., na.rm=T))) %>% 
-    ungroup() %>% 
-    mutate_at(variable, list(VAR_E =  ~var(., na.rm=T))) %>% 
-    mutate(name = VAR_G/VAR_E) %>% 
-    dplyr::select({{genotype}}, name ) %>% 
-    rename_at(vars(contains("name")), ~paste0("PP_", variable[[1]])) %>% 
-    
-    unique()
-  
-  out = full_join(data, data1, by = join_by({{genotype}}))
-  return(out)
-}
-
-calculate_sd <- function(lb, ub, m) {
-  # Z-Score for a 95% confidence interval
-  z_score <- qnorm(0.95)
-  ci <- ub - lb
-  # Calculate standard deviation
-  sd <- ci / (2 * z_score)
-  return(sd)
-}
-
-# Formula for quantile regression equation
-formula_quantile <- function(fit){
-  b0 <- paste0(round(fixef(fit)[1,1],2))
-  b1 <- paste0(round(fixef(fit)[2,1],2))
-  pc <- paste0(round(fixef(fit)[3,1],2))
-  
-  pred <- linpred_draws(fit, 
-                        newdata = data.frame(PP_GY = fixef(fit)[3,1]),
-                        value = ".prediction")
-  pc_mean <- round(mean(pred$.prediction),2)
-  
-  paste0("y = ", b0 ," + ", b1 ,"x if x < ", pc, "; y = ", pc_mean ," otherwise.")
-}
-

@@ -1,0 +1,21 @@
+---
+title: "Untitled"
+format: docx
+editor: visual
+---
+
+Broad sense heritability was calculated from the Finlay-Wilkinson regression model, in a 10 year rolling window over the cultivar's year of release starting in 1989.
+
+$$H^2 = \frac{\sigma^2_g}{\sigma^2_g +\frac{\sigma^2_b}{n_b}+\frac{\sigma^2_e}{n_e}+\frac{\sigma^2_\epsilon}{n_\epsilon}}$$
+
+$$e \sim N(\mathbf{0},\mathbf{E}\sigma^2_e)$$
+
+$$g \sim N(\mathbf{0},\mathbf{G}\sigma^2_g)$$
+
+$$\beta \sim N(\mathbf{0},\mathbf{A}\sigma^2_b)$$
+
+$$y_{ijk} \sim N(\mu_{ijk}, \sigma^2)$$
+
+$$ y_{ijk} =   \mu + g_{i} + e_{j} + \beta_{i}e_j + \epsilon_ijk$$
+
+In Equation XXX $y_{ijk}$ represents the observed yield at the $k^{th}$ replicate $(i: 1,2,...,n)$, of the $i^{th}$ genotype $(j:1,2,...235)$ at the $j^{th}$ environment. This model assumed $\mu$ represents the overall intercept, while $g_i$ and $e_j$ are the main effects of genotypes and environments respectively. $\g_i$ can be also interpreted as the intercept of the reaction norm and $\beta_i$ represents the slope used as an estimate of grain yield phenotypic plasticity. $\epsilon_{ijk}$ is the error term assumed normally distributed with expected value equal to zero and variance $\sigma^2_e$.

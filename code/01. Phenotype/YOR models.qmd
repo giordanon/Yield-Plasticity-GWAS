@@ -1,0 +1,244 @@
+---
+title: "YOR models"
+format: html
+editor: visual
+---
+
+# Load data
+
+```{r}
+data2 <- read.csv("../../data/phenotypes/var_traits_final_YOR.csv")[, c("G", "YOR")] %>% 
+  rename_all(~c("G", ".yor")) %>% 
+  mutate(.,
+         G = str_replace_all(G, " ", "_"), 
+         G = str_replace_all(G, "/", "-"), 
+         G = str_replace_all(G, "'", ""), 
+         G = str_replace_all(G, "SNOWMASS_2.0", "SNOWMASS_2"), 
+         G = str_replace_all(G, "BAKER_S_ANN", "BAKERS_ANN"), 
+         G = str_replace_all(G, "SMITH_S_GOLD", "SMITHS_GOLD")
+         ) %>% 
+  # These cultivars don't have marker data
+  filter(G %nin% c("AGSECO_7853", "CSU_BLEND09", "JAG,2137", "JEI_110",
+                   "KALVESTA", "OK05312", "SY_LLANO","TAM_113","TONKAWA")) %>% 
+  drop_na() %>% 
+  mutate(.yor = .yor - min(.yor)) %>% 
+  left_join(readRDS("../../output/model output/phenotypes_distribution_moments.RData")) #%>% 
+  # add PC
+  #left_join(read.csv("../../output/GWAS_FarmCPU/PC_20/GAPIT.Genotype.PCA.csv") %>% rename(G = taxa))
+
+
+```
+
+```{r}
+# data2 %>% 
+#   pivot_longer(cols = contains("PC")) %>% 
+#   ggplot(aes(x = .yor, y = value))+
+#   geom_point()+
+#   facet_wrap(~name, scales = "free_y")
+```
+
+```{r fig.width=5, fig.height=5}
+gc <- 
+ggcorrplot::ggcorrplot(cor(data2[,3:6] %>% 
+                             rename_all(~c("Yield quantile 0.95","Yield quantile 0.05",
+                                           "Yield mean", "Yield plasticity" ))),
+                       p.mat = ggcorrplot::cor_pmat(data2[,3:6]),
+                       lab = T, 
+                       sig.level = 0.05,
+                       hc.order = T,
+                       type = "lower")+
+  theme(plot.background = element_rect(fill = "white", color = "white"))
+
+ggsave(plot = gc, "../../output/plots/paper/correlation_matrix.png", width = 5, height = 5, dpi=600)
+```
+
+```{r fig.width=5, fig.height=5}
+pca <- prcomp(phenotypes[,-1], 
+              scale. = T) 
+biplot(pca)
+```
+
+# Phenotype v YOR
+
+## Slope of FW regression
+
+```{r}
+mod_slope<- brm(
+  prior = c(prior_string("uniform(-10, 10)", class = "Intercept", lb = -10, ub = 10),
+            prior_string("normal(0, 0.1)", class = "b") 
+           # prior_string("uniform(0,55)", nlpar = "BP", lb = 0, ub = 55)
+               #prior_string("gamma(2,1)", class = "sigma", lb = 0)
+               ),
+     bf(slope ~ .yor),
+     chains = 4,
+     warmup = 5000,
+     iter = 10000, 
+     data = data2, 
+     control = list(adapt_delta = 0.95),
+     family = gaussian(link = "identity")
+     )
+
+saveRDS(mod_slope, "../../output/model output/model_slope_yor.RData")
+```
+
+## Quantile 0.975
+
+```{r}
+mod_q975 <- brm(
+  prior = c(prior_string("uniform(-10, 10)", nlpar = "A", lb = -10, ub = 10),
+            prior_string("normal(0, 0.1)", nlpar = "R"), 
+            prior_string("uniform(0,55)", nlpar = "BP", lb = 0, ub = 55)
+            ),
+     bf(q975 ~ A + (R * .yor) * (.yor >= BP) + A + (R * BP) * (.yor < BP), 
+        nl = TRUE, 
+        A + R + BP ~ 1),
+     chains = 4,
+     warmup = 5000,
+     iter = 10000, 
+     data = data2, 
+     control = list(adapt_delta = 0.95),
+     family = Gamma(link = "log")
+     )
+
+saveRDS(mod_q975, "../../output/model output/model_q975_yor.RData")
+
+```
+
+## Main genotype effect
+
+```{r}
+mod_mean <- brm(
+  prior = c(prior_string("normal(0, 10)", nlpar = "A"),
+            prior_string("normal(0, 0.1)", nlpar = "R"), 
+            prior_string("normal(25,50)", nlpar = "BP")
+            ),
+     bf(mean ~ A + (R * .yor) * (.yor >= BP) + A + (R * BP) * (.yor < BP), 
+        nl = TRUE, 
+        A + R + BP ~ 1),
+     chains = 4,
+     warmup = 5000,
+     iter = 10000, 
+     data = data2, 
+     control = list(adapt_delta = 0.95),
+     family = gaussian(link = "identity")
+     )
+
+saveRDS(mod_mean, "../../output/model output/model_mean_yor.RData")
+```
+
+```{r}
+mod_mean <- readRDS("../../output/model output/model_mean_yor.RData")
+
+newdata <- expand_grid(.yor = seq(min(mod_mean$data$.yor), 
+                                  max(mod_mean$data$.yor), 
+                                  length.out = 60
+                                  )
+                        )
+
+# get predictions
+preds <- add_predicted_draws(mod_mean, 
+                             newdata = newdata, value = ".predicted") %>% 
+  summarise(.groups = "keep",
+            q050 = mean(.predicted), 
+            q975 = quantile(.predicted, probs = .975), 
+            q025 = quantile(.predicted, probs = 0.025))
+
+p3 <- 
+ggplot()+
+
+  geom_line(data = preds, aes(x = .yor+1967,
+                              y = q050), linewidth = 1)+
+
+  geom_ribbon(data = preds, aes(x = .yor+1967,
+                                 ymax = q975, ymin = q025), alpha = 0.2)+
+  geom_point(data = data2,
+             aes(x = .yor+1967, y = mean), alpha = .6, shape = 21, size=3, fill = "red4")+
+  scale_x_continuous(breaks = seq(1960, 2030, 10), limits = c(1965, 2030))+
+
+  labs(x = expression("Year of release"), 
+       y = expression("Main genotype effect on yield")
+       )+
+  theme_nice()
+p3
+```
+
+## Quantile 0.05
+
+```{r}
+mod_q050 <- brm(
+  prior = c(prior_string("uniform(-10, 10)", nlpar = "A", lb = -10, ub = 10),
+            prior_string("normal(0, 0.1)", nlpar = "R"), 
+            prior_string("normal(25,50)", nlpar = "BP")
+            ),
+     bf(q050 ~ A + (R * .yor) * (.yor >= BP) + A + (R * BP) * (.yor < BP), 
+        nl = TRUE, 
+        A + R + BP ~ 1),
+     chains = 4,
+     warmup = 5000,
+     iter = 10000, 
+     data = data2, 
+     control = list(adapt_delta = 0.95),
+     family = Gamma(link = "log")
+     )
+
+saveRDS(mod_q050, "../../output/model output/model_q050_yor.RData")
+
+```
+
+
+
+
+
+# Retrieve slopes from models
+
+```{r}
+mod <- readRDS("../../output/model output/model_q975_yor.RData")
+
+mod <- readRDS("../../output/model output/model_mean_yor.RData")
+
+mod <- readRDS("../../output/model output/model_q050_yor.RData")
+
+mod <- readRDS("../../output/model output/model_slope_yor.RData")
+
+
+posterior_summary(mod)[3,4] + 1967
+
+
+library(marginaleffects)
+
+
+s <- avg_slopes(mod, 
+            #variables = ".yor",
+            #by = ".yor",
+            newdata = data.frame(.yor = seq(posterior_summary(mod)[3,4],
+                                       max(mod$data$.yor))
+                            )
+       ) %>% 
+  summarise_all(~mean(.))
+
+
+# newdata <- expand_grid(.yor = seq(min(mod$data$.yor), 
+#                                   max(mod$data$.yor), 
+#                                   length.out = 60
+#                                   )
+#                         )
+# 
+# preds <- add_predicted_draws(mod, 
+#                              newdata = newdata, value = ".predicted") %>% 
+#   summarise(.groups = "keep",
+#             q050 = mean(.predicted), 
+#             q975 = quantile(.predicted, probs = .975), 
+#             q025 = quantile(.predicted, probs = 0.025))
+# 
+# p <- preds %>% 
+#   filter(.yor %in% c(55)) %>% 
+#   ungroup() %>% 
+#   select(q050, q025, q975)
+  
+
+# (s[5:7]/p[,])*100
+
+((unlist(c(s[2:4]))/mean(dataFW$y)) * 100)-3.24
+
+```
+

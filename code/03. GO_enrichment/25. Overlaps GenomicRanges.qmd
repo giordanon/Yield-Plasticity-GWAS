@@ -1,0 +1,142 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+```{r message=FALSE}
+library(GenomicRanges)
+library(IRanges)
+library(tidyverse)
+library(hrbrthemes)
+library(tm)
+library(proustr)
+library(VennDiagram) # Venn diagram to visualize overlaps
+
+clrs <- MetBrewer::met.brewer("Java")
+`%nin%` <- Negate(`%in%`)
+```
+
+```{r message=FALSE}
+# Get significant SNPs
+path <- "../../output/GWAS_FarmCPU_Cov/PC_10/"
+pattern <- "GAPIT.Association.GWAS_Results.*"
+files <- list.files(path = path, 
+                    pattern = pattern,  
+                    full.names = T)
+
+pdata <- read_csv(files, id = "trait") %>% 
+  janitor::clean_names() %>% 
+  # Extract trait names from file path
+  mutate(trait = as.character(str_extract_all(trait, "mean|q050|q975|slope")), 
+         logp = -log10(p_value)) %>% 
+  # Filter FDR < 5%
+  filter(logp >3) %>% 
+  #filter(h_b_p_value < 0.05) %>% 
+  rowid_to_column("id")
+```
+
+# Check for overlapping SNPs
+
+Wheat Reference Genome
+
+https://www.ncbi.nlm.nih.gov/datasets/gene/GCF_018294505.1/?gene_type=protein-coding
+
+```{r include=FALSE}
+# Load reference genome
+wg <- read_table("../../data/wheat_genome/ncbi_dataset.tsv") %>% 
+  filter(Chromosome %nin% c("MT", "plus", "minus"))
+
+# For each SNP get a 20kb window
+query <- GRanges(seqnames = Rle(pdata$chr),
+                 # width from LD decay
+                 IRanges(pdata$pos, width=20000),
+                 #IRanges(pdata$pos, width=2579160), 
+                 strand = "*")
+# GRanges for wheat genome
+subject <- GRanges(seqnames = Rle(wg$Chromosome),
+                 IRanges(start = wg$Begin, end = wg$End), 
+                 strand = "*")
+mcols(subject)$gene_id <- wg$ID
+
+# Find overlapping candidate genes
+ol <- findOverlaps(query, subject, ignore.strand=TRUE)
+```
+
+# List of annotated genes related to traits
+
+```{r}
+SNPs_freq<- 
+cbind(
+  pdata[ol@from,c("trait", "snp", "effect")],
+  wg[ol@to,c("Accession","Chromosome", "Begin", "End", "Orientation","Transcripts")]  ) %>% 
+  select(trait, Accession, snp) %>% 
+  unique() %>% 
+  nest(.by = c("Accession", "trait")) %>% 
+  # Retrieve only one SNP per accession, other SNPs are supposed to be in LD with selected SNP
+  mutate(SNP = map_chr(data, ~as.character(.x[1,"snp"]))) %>% 
+  select(-data)
+
+
+saveRDS(SNPs_freq, "../../output/unique_SNPs_frequancy_20k.RData")
+```
+
+```{r}
+# Reformat data to plot
+dataVenn <- 
+  as.data.frame(ol) %>% 
+  cbind(wg[ol@to,"Accession"]) %>% 
+  mutate(.,
+         trait = pdata$trait[queryHits]) %>% 
+  select(-c(queryHits, subjectHits)) %>% 
+  # Rename *manually* snps that are closer together
+  group_by(trait, Accession) %>% 
+  count() %>% 
+  ungroup() %>% 
+  #mutate(n = map(n, ~rep(1, .))) %>% 
+  pivot_wider(names_from = trait, 
+              values_from = n) %>% 
+  unnest(cols = everything()) %>%
+  # when NA there are no overlapping genes neither candidate genes associated to trait
+  mutate_if(is.double, ~case_when(is.na(.)~0, T~.)) %>%  
+  mutate_at(vars(mean:slope), ~case_when(!is.na(.) ~ Accession, T~NA_character_)) %>% 
+  unique()
+```
+
+```{r message=FALSE}
+#Make the plot
+venn.diagram(
+  x = list(
+    dataVenn[,"mean"] %>% unlist(), 
+    dataVenn[,"slope"] %>% unlist(), 
+    dataVenn[,"q975"] %>% unlist(),
+    dataVenn[,"q050"] %>% unlist()
+    ),
+  category.names = c("Yield\n mean" , "Yield\n plasticity" , "95th yield percentile", "5th yield percentile"),
+  filename = '../../output/plots/paper/venn_PC10_20kwindow.png',
+  output = TRUE ,
+  na = "remove",
+          imagetype="png",
+          height = 500,
+          width = 500,
+          resolution = 350,
+          compression = "lzw",
+          lwd = 1, 
+          col=clrs[c(1,2,3,5)],
+          fill = c(alpha(clrs[1],0.3), alpha(clrs[2],0.3),alpha(clrs[3],0.3), alpha(clrs[5],0.3)),
+          cex = 0.5,
+          fontfamily = "sans",
+          cat.cex = 0.3,
+          cat.default.pos = "outer",
+          #cat.pos = c(0, 0, 0, 90),
+          #cat.dist = c(0.055, 0.055,0.055, 0.035),
+          cat.fontfamily = "sans",
+          cat.col = clrs[c(1,2,3,5)]
+          #rotation = 1
+        )
+# List all files ending with .log in the working directory
+log_files <- list.files(pattern = "\\.log$", path = "../../output/plots/paper/")
+# Remove the log files
+file.remove(paste0("../../output/plots/paper/", log_files))
+
+```

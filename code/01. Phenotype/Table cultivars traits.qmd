@@ -1,0 +1,46 @@
+
+```{r include  = FALSE}
+suppressWarnings(source("../functions.R"))
+```
+
+```{r}
+# Load FW model
+fw <- readRDS("../../output/model output/fw_slope.RData")
+
+mu <- mean(fw$mu)
+
+data2 <- read.csv("../../data/phenotypes/var_traits_final_YOR.csv")[, c("G", "YOR")] %>% 
+  rename_all(~c("G", ".yor")) %>% 
+  mutate(.,
+         G = str_replace_all(G, " ", "_"), 
+         G = str_replace_all(G, "/", "-"), 
+         G = str_replace_all(G, "'", ""), 
+         G = str_replace_all(G, "SNOWMASS_2.0", "SNOWMASS_2"), 
+         G = str_replace_all(G, "BAKER_S_ANN", "BAKERS_ANN"), 
+         G = str_replace_all(G, "SMITH_S_GOLD", "SMITHS_GOLD")
+         ) %>% 
+  # These cultivars don't have marker data
+  filter(G %nin% c("AGSECO_7853", "CSU_BLEND09", "JAG,2137", "JEI_110",
+                   "KALVESTA", "OK05312", "SY_LLANO","TAM_113","TONKAWA")) %>% 
+  drop_na() %>% 
+  mutate(.yor = .yor - min(.yor)) %>% 
+  left_join(readRDS("../../output/model output/phenotypes_distribution_moments.RData")) %>% 
+  mutate(mean = mean+mu)
+
+dataVPT <- read.csv("../../data/phenotypes/dataVPT.csv") %>% 
+  select(G, E) %>% 
+  unique() %>% 
+  count(G) %>% 
+  left_join(data2, by = join_by(G))
+```
+
+```{r}
+dataVPT %>% 
+  select(G, n, .yor, q975, q050, mean, slope) %>% 
+  unique() %>% 
+  mutate(.yor = .yor+1967) %>% 
+  mutate_at(vars(q975:slope), ~round(.,2)) %>% 
+  write.csv("../../output/plots/genotype_traits.csv", row.names = F)
+```
+
+
