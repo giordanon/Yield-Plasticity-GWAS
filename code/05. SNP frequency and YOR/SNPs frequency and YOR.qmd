@@ -364,7 +364,7 @@ test3 %>%
 
 
 ```{r fig.width=10, fig.height = 6, warning = FALSE}
-p <- ggpubr::ggarrange(pf,pf2, nrow = 2, heights = c(0.59, 0.41))
+p <- ggpubr::ggarrange(pf,pf2, nrow = 2)
 
-ggsave(plot = p, "../../output/plots/paper/frequancies_effect_bayes.png", width = 10, height = 5, dpi = 600)
+ggsave(plot = p, "../../output/plots/paper/frequancies_effect_bayes.svg", width = 10, height = 5, dpi = 600)
 ```
